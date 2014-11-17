@@ -1,0 +1,1468 @@
+
+unit uThreadImportacao;
+
+interface
+
+uses
+   Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, Buttons, JvExStdCtrls, JvGroupBox, ExtCtrls, IOUtils,
+  FMTBcd, DB, SqlExpr, DateUtils, xmldom, XMLIntf, msxmldom, XMLDoc,
+  IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdHTTP, jpeg, StrUtils,
+  PngImage, ActiveX, DBXCommon, SyncObjs, DBClient, Provider;
+
+type
+  TRGBArray = array[Word] of TRGBTriple;
+  pRGBArray = ^TRGBArray;
+
+type
+   TDefaultXML = (dxNone, dxDogus);
+
+type
+  ThreadImportacao = class(TThread)
+  private
+    FDefaultXML: TDefaultXML;
+    FIdAgendameto: integer;
+    FIdImobiliaria: Integer;
+    FIdBancoDados: Integer;
+    FPortal: string;
+    FUrlXml: string;
+    FPathXml: string;
+    FPathMarcaAgua: string;
+    FPathImagem: string;
+    FNomeMarcaAgua: string;
+    FTipoXml: string;
+    FConexaoPortal: TSQLConnection;
+    FConexaoAux: TSQLConnection;
+    procedure setConexaoAux(const Value: TSQLConnection);
+    function getConexaoAux: TSQLConnection;
+
+  protected
+    procedure ConectarPortal();
+    procedure LoadConfig();
+    procedure ImportaXMLDogus(idImobiliaria:integer);
+    procedure AtualizaInfoTarefa(idAgendamento: integer; duracao, status, msg, nameXml: string);
+    function VerificaDuplicidadeImovel(Guid: integer): boolean;
+    procedure ProcessaImagemDogus(pathXML: string);
+    function CalculaDuracao(timeInicial, timeFinal: TDateTime): string;
+    procedure ResizeImage(FileName, nameImagem, urlFoto: string; largura, altura, idExterno: Integer);
+    function SaveJPEGPictureFile(Bitmap: TBitmap; FilePath,FileName:string; Quality: Integer): Boolean;
+    function StrToCoord(AStr: string): TPoint;
+    procedure SmoothResize(Src, Dst: TBitmap);
+    procedure DownloadXML(url, pathXml, nameFile: string);
+    procedure Execute; override;
+    procedure InseriTempXML(pathXML: string);
+    procedure CombineImage(var Img: TJPEGImage ;const ATopLeftPos: TPoint; const AImgMarca: string);
+    procedure ContaImoveisFotos(pathXML: string);
+
+  public
+    property ConexaoAux: TSQLConnection read getConexaoAux write setConexaoAux;
+    procedure Finalizar();
+
+    constructor Create(CreateSuspended: Boolean; idAgendamento, idImobiliaria, idBancoDados: integer; tipoXML: string; var ConexaoAux: TSQLConnection);
+  end;
+
+var
+  iContFoto, iContErroFoto, iContTotalItem, iContTotalFoto, iContInserido, iContAtualizado, iContExcluido: Integer;
+  FCritical : TCriticalSection;
+
+implementation
+
+uses uPrincipal, uDM, uImportacao, uImportacaoDogus;
+
+{ ThreadImportacao }
+
+// Método que dispara a Thread
+procedure ThreadImportacao.Execute;
+begin
+    if not Terminated  then
+    begin
+        try
+            // Inicializa a Seção critica
+            FCritical.Enter;
+
+            CoInitialize(nil);
+            case FDefaultXML of
+                dxDogus : TImportacaoDogus.Create(FIdAgendameto, FIdImobiliaria, FIdBancoDados, FConexaoAux);
+            end;
+        finally
+            // Inicializa a Seção critica
+            FCritical.Leave;
+        end;
+    end;
+end;
+
+procedure ThreadImportacao.Finalizar;
+begin
+    Self.Terminate;
+    Self.AtualizaInfoTarefa(FIdAgendameto, '', 'C', 'Cancelado pelo usuário', '');
+end;
+
+// Configura uma conexão com o banco de dados específico do portal
+procedure ThreadImportacao.ConectarPortal;
+var
+   oQry: TSQLQuery;
+begin
+    try
+        try
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := Self.getConexaoAux;
+             oQry.Close;
+             oQry.SQL.Clear;
+             oQry.SQL.Add('SELECT id, host, usuario, senha, bancoDados, timeOut FROM TAB_BANCO_DADOS WHERE id = :id AND registro = :registro');
+             oQry.ParamByName('id').AsInteger      := Self.FIdBancoDados;
+             oQry.ParamByName('registro').AsString := 'A';
+             oQry.Open;
+
+             if not oQry.IsEmpty then
+             begin
+                 Self.FConexaoPortal := TSQLConnection.Create(nil);
+                 Self.FConexaoPortal.Connected     := False;
+                 Self.FConexaoPortal.LoginPrompt   := false;
+                 Self.FConexaoPortal.ParamsLoaded  := True;
+                 Self.FConexaoPortal.DriverName    := 'MSSQL';
+                 Self.FConexaoPortal.GetDriverFunc := 'getSQLDriverMSSQL';
+                 Self.FConexaoPortal.LibraryName   := 'dbxmss.dll';
+                 Self.FConexaoPortal.VendorLib     := 'sqlncli10.dll';
+                 Self.FConexaoPortal.Params.Clear;
+                 Self.FConexaoPortal.Params.Add('hostname='+  oQry.FieldByName('host').AsString);
+                 Self.FConexaoPortal.Params.Add('user_name='+ oQry.FieldByName('usuario').AsString);
+                 Self.FConexaoPortal.Params.Add('password='+  oQry.FieldByName('senha').AsString);
+                 Self.FConexaoPortal.Params.Add('Database='+  oQry.FieldByName('bancoDados').AsString);
+                 Self.FConexaoPortal.Params.Add('connecttimeout='+ IntToStr(oQry.FieldByName('timeOut').AsInteger));
+                 Self.FConexaoPortal.Connected := True;
+             end;
+        except
+             on E:Exception do
+             MessageDlg('Erro ao carregar dados de conexão do portal: ' + E.Message, mtError, [mbOK], 0);
+        end;
+    finally
+        Self.ConexaoAux.Close;
+        FreeAndNil(oQry);
+    end;
+end;
+
+procedure ThreadImportacao.ContaImoveisFotos(pathXML: string);
+var
+  oNodePai, oNodeItem, oNodeFotos, oNodeFoto: IXMLNode;
+  oXMLDoc: TXMLDocument;
+begin
+     // Inseri os dados para atualização da tarefa
+     self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Contando imóveis e fotos do arquivo XML', '');
+     try
+          try
+               // Instância o objeto XMLDocument e carrega o arquivo XML
+               oXMLDoc := TXMLDocument.Create(Application);
+               oXMLDoc.FileName := pathXML;
+               oXMLDoc.Active := True;
+
+               // Identifica o Node principal do XML
+               oNodePai := oXMLDoc.DocumentElement.ChildNodes.FindNode('channel');
+               repeat
+                    oNodeItem := oNodePai.ChildNodes.FindNode('item');
+                    oNodeItem.ChildNodes.First;
+
+                    repeat
+                         // Contador para gravar a quantidade de registros lidos e gravados no banco de dados
+                         Inc(iContTotalItem);
+
+                         oNodeFotos := oNodeitem.ChildNodes.FindNode('fotos');
+                         if oNodeFotos <> nil then
+                         begin
+                             oNodeFotos.ChildNodes.First;
+
+                             repeat
+                                  oNodeFoto := oNodeFotos.ChildNodes.FindNode('foto');
+                                  if oNodeFoto <> nil then
+                                  begin
+                                      oNodeFoto.ChildNodes.First;
+
+                                      repeat
+                                          // Processa as imagens do XML
+                                          Inc(iContTotalFoto);
+
+                                          oNodeFoto := oNodeFoto.NextSibling;
+                                      until (oNodeFoto = nil) ;
+                                  end;
+
+                                  oNodeFotos := oNodeFotos.NextSibling;
+                             until (oNodeFotos = nil) ;
+                         end;
+
+                         oNodeItem := oNodeItem.NextSibling;
+                    until (oNodeItem = nil) ;
+
+                    oNodePai := oNodePai.NextSibling;
+               until (oNodePai = nil) ;
+          except
+
+          end;
+
+     finally
+        FreeAndNil(oXMLDoc);
+     end;
+end;
+
+// Método constutor da Classe
+constructor ThreadImportacao.Create(CreateSuspended: Boolean; idAgendamento,
+  idImobiliaria, idBancoDados: integer; tipoXML: string; var ConexaoAux: TSQLConnection);
+begin
+    inherited Create(CreateSuspended);
+    Self.FDefaultXML := dxNone;
+    Self.FIdAgendameto  := idAgendamento;
+    Self.FIdImobiliaria := idImobiliaria;
+    Self.FIdBancoDados  := idBancoDados;
+    Self.setConexaoAux(ConexaoAux);
+
+    if tipoXML = 'dogus' then
+       Self.FDefaultXML := dxDogus
+
+end;
+
+// Procedure para finalizar a tarefa inserindo os dados necessários na TAB_TAREFA
+procedure ThreadImportacao.AtualizaInfoTarefa(idAgendamento: integer; duracao, status, msg, nameXml: string);
+var
+  oQry: TSQLQuery;
+  sSqlFull, sSqlMin : string;
+begin
+     try
+         sSqlFull := 'UPDATE TAB_TAREFA SET statusAtual = :status, qtdeRegistroI = :qRegistroI, qtdeImagem = :qImagem, qtdeErroImagem = :qErroImagem, duracao = :duracao, msg = :msg, xmlTotalImovel = :qTotalImovel, ';
+         sSqlFull := sSqlFull + 'xmlTotalFoto = :qTotalFoto, qtdeRegistroA = :qRegistroA, qtdeRegistroE = :qRegistroE ';
+         sSqlMin  := 'UPDATE TAB_TAREFA SET xmlTotalImovel = :qTotalImovel,  xmlTotalFoto = :qTotalFoto ';
+
+         try
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := Self.getConexaoAux();
+             oQry.Close;
+             oQry.SQL.Clear;
+
+             if status = EmptyStr then
+                oQry.SQL.Add(sSqlMin)
+             else
+                oQry.SQL.Add(sSqlFull);
+
+             oQry.SQL.Add('WHERE idAgendamento = :id AND statusAtual = :statusAtual AND dataCadastro = :data');
+
+             if status = EmptyStr then
+             begin
+                 oQry.ParamByName('qTotalImovel').AsInteger := iContTotalItem;
+                 oQry.ParamByName('qTotalFoto').AsInteger   := iContTotalFoto;
+             end
+             else
+             begin
+                 oQry.ParamByName('status').AsString        := status;
+                 oQry.ParamByName('qRegistroI').AsInteger   := iContInserido;
+                 oQry.ParamByName('qRegistroA').AsInteger   := iContAtualizado;
+                 oQry.ParamByName('qRegistroE').AsInteger   := iContExcluido;
+                 oQry.ParamByName('qImagem').AsInteger      := iContFoto;
+                 oQry.ParamByName('qErroImagem').AsInteger  := iContErroFoto;
+                 oQry.ParamByName('duracao').AsString       := duracao;
+                 oQry.ParamByName('msg').AsString           := msg;
+                 oQry.ParamByName('qTotalImovel').AsInteger := iContTotalItem;
+                 oQry.ParamByName('qTotalFoto').AsInteger   := iContTotalFoto;
+             end;
+
+             oQry.ParamByName('id').AsInteger           := idAgendamento;
+             oQry.ParamByName('statusAtual').AsString   := 'E';
+             oQry.ParamByName('data').AsDateTime        := Date;
+             oQry.ExecSQL();
+
+             DeleteFile(FPathXml + nameXml);
+         except
+             on E:Exception do
+             MessageDlg('Erro ao atualizar status da tarefa: ' + E.Message, mtError, [mbOK], 0);
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+function ThreadImportacao.getConexaoAux: TSQLConnection;
+begin
+    FConexaoAux.Open;
+    Sleep(2000);
+    Result := FConexaoAux;
+end;
+
+procedure ThreadImportacao.setConexaoAux(const Value: TSQLConnection);
+begin
+    if Assigned(Value) then
+    begin
+        Value.Connected := False;
+        FConexaoAux := Value;
+    end;
+end;
+
+// Função para converter as coordenadas da imagem principal e marca d'água
+function ThreadImportacao.StrToCoord(AStr: string): TPoint;
+var
+  i: Integer;
+begin
+    i := System.Pos(',', AStr);
+    if i < 2 then
+      raise Exception.Create('Valor inválido para coordenada!');
+
+    Result.X := StrToInt(Trim(Copy(AStr, 1, i-1)));
+    Result.Y := StrToInt(Trim(Copy(AStr, i+1, MAXINT)));
+end;
+
+// Função que cálcula e retorna o tempo de duração da importação
+function ThreadImportacao.CalculaDuracao(timeInicial, timeFinal: TDateTime): string;
+var
+   iDiff, iHora: Integer;
+begin
+     iHora := 0;
+     iDiff := 0;
+
+     iDiff := MinutesBetween(timeFinal, timeInicial);
+     while iDiff > 60 do
+     begin
+         iDiff := iDiff - 60;
+         Inc(iHora);
+     end;
+     Result := FormatFloat('00', iHora)+ ':' + FormatFloat('00', iDiff);
+end;
+
+// Função para baixar o arqivo XML do cliente
+procedure ThreadImportacao.DownloadXML(url, pathXml, nameFile: string);
+var
+  oMs: TMemoryStream;
+  oHTTP: TIdHTTP;
+begin
+    oMs   := TMemoryStream.Create;
+    oHTTP := TIdHTTP.Create(nil);
+    try
+        try
+            oMs.Clear;
+            try
+                url := StringReplace(url, ' ', '%20',[rfReplaceAll]);
+                oHTTP.Get(url, oMs);
+            except
+                on E: EIdHTTPProtocolException do
+            end;
+            oMs.Position := 0;
+
+            if not DirectoryExists(pathXml) then
+               ForceDirectories(pathXml);
+
+            oMs.SaveToFile(pathXml + nameFile);
+        Except
+            on E:Exception do
+            MessageDlg('Erro ao baixar XML: ' + E.Message, mtError, [mbOK], 0);
+        end;
+    finally
+        FreeAndNil(oMs);
+        FreeAndNil(oHTTP);
+    end;
+end;
+
+// Procedure para leitura e inclusão ou atualizaçao das Tags do XML no banco de dados
+{procedure ThreadImportacao.ImportaXMLDogus(idImobiliaria:integer);
+var
+   iContItem, iDuracaoHora, iDuracaoMinuto, iDuracaoSegundos, iNumeroXml, iContIdFoto: integer;
+   oNodePai, oNodeItem, oNodeFotos, oNodeFoto: IXMLNode;
+   oXMLDoc: TXMLDocument;
+   oQry: TSQLQuery;
+   tTimeInicial, tTimeFinal : TDateTime;
+   sNameImagem, sGuid, sNomeXml: string;
+begin
+    if not Terminated then
+    begin
+        try
+             try
+                 // Inicializa a Seção critica
+                 FCritical.Enter;
+
+                 // Inicializa as variáveis
+                 iContItem      := 0;
+                 iContFoto      := 0;
+                 iContIdFoto    := 0;
+                 iContTotalItem := 0;
+                 iContTotalFoto := 0;
+                 Self.LoadConfig;
+
+                 // Atribui a hora de início do processo
+                 tTimeInicial := Now;
+
+                 // Chama a função para baixar o aquivo XML
+                 Randomize;
+                 iNumeroXml := Random(99999);
+                 sNomeXml   := IntToStr(iNumeroXml) + '_xml.xml';
+                 Self.DownloadXML(FUrlXml, FPathXml, sNomeXml);
+
+                 // Verifica se o arquivo XML NÃO existe, ser verdadeiro gera uma exception e finaliza a rotina
+                 if not FileExists(FPathXml + sNomeXml) then
+                    raise Exception.Create('Arquivo XML não encontrado!');
+
+                 // Chama procedure para contar o total de imóveis e fotos no XML
+                 Self.ContaImoveisFotos(FPathXml + sNomeXml);
+
+                 // Inseri os dados para finalização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, 0, 0, '', '', '', '');
+
+                 // Instância o objeto XMLDocument e carrega o arquivo XML
+                 oXMLDoc := TXMLDocument.Create(Application);
+                 oXMLDoc.FileName := FPathXml + sNomeXml;
+                 oXMLDoc.Active := True;
+
+                 // Chama a função para executar a conexão com o respectivo portal onde serão gravados os dados
+                 Self.ConectarPortal;
+                 oQry := TSQLQuery.Create(nil);
+                 oQry.SQLConnection := Self.FConexaoPortal;
+
+                 // Identifica o Node principal do XML
+                 oNodePai := oXMLDoc.DocumentElement.ChildNodes.FindNode('channel');
+                 repeat
+                      oNodeItem := oNodePai.ChildNodes.FindNode('item');
+                      oNodeItem.ChildNodes.First;
+
+                      repeat
+
+                           // Atribui o guid do imóvel
+                           sGuid := oNodeItem.ChildNodes['guid'].Text;
+
+                           // Verifica se o imóvel ainda não foi cadastrado, se verdadeiro executa um INSERT senão passa para o UPDATE
+                           if not Self.VerificaDuplicidadeImovel(StrToInt(oNodeItem.ChildNodes['guid'].Text)) then
+                           begin
+                                // Inseri os registros no banco de dados
+                                oQry.Close;
+                                oQry.SQL.Clear;
+                                oQry.SQL.Add('INSERT INTO imoveis2 (id_externo, categoria, tipo, cidade, endereco, titulo, descricao, cond_pag, area, area_c, quartos, suites, tipo_construcao, salas, ambientes, cozinhas, ');
+                                oQry.SQL.Add('wc, lavabo, piscina, garagem, telefone, data, cod_usuario, views, status, aprovado, valor, bairro)VALUES');
+                                oQry.SQL.Add('(:id_externo, :categoria, :tipo, :cidade, :endereco, :titulo, :descricao, :cond_pag, :area, :area_c, :quartos, :suites, :tipo_construcao, :salas, :ambientes, :cozinhas, ');
+                                oQry.SQL.Add(':wc, :lavabo, :piscina, :garagem, :telefone, :data, :cod_usuario, :views, :status, :aprovado, :valor, :bairro)');
+                                oQry.ParamByName('id_externo').AsInteger     := StrToInt(oNodeItem.ChildNodes['guid'].Text);
+                                oQry.ParamByName('categoria').AsString       := oNodeItem.ChildNodes['categoria'].Text;
+                                oQry.ParamByName('tipo').AsString            := oNodeItem.ChildNodes['tipo'].Text;
+                                oQry.ParamByName('cidade').AsString          := oNodeItem.ChildNodes['cidade'].Text;
+                                oQry.ParamByName('endereco').AsString        := oNodeItem.ChildNodes['endereco'].Text;
+                                oQry.ParamByName('titulo').AsString          := oNodeItem.ChildNodes['title'].Text;
+                                oQry.ParamByName('descricao').AsString       := oNodeItem.ChildNodes['descricao'].Text;
+                                oQry.ParamByName('cond_pag').AsString        := oNodeItem.ChildNodes['cond_pag'].Text;
+                                oQry.ParamByName('area').AsString            := oNodeItem.ChildNodes['area'].Text;
+                                oQry.ParamByName('area_c').AsString          := oNodeItem.ChildNodes['area_c'].Text;
+                                oQry.ParamByName('quartos').AsString         := oNodeItem.ChildNodes['quartos'].Text;
+                                oQry.ParamByName('suites').AsString          := oNodeItem.ChildNodes['suites'].Text;
+                                oQry.ParamByName('tipo_construcao').AsString := oNodeItem.ChildNodes['tipo_construcao'].Text;
+                                oQry.ParamByName('salas').AsString           := oNodeItem.ChildNodes['salas'].Text;
+                                oQry.ParamByName('ambientes').AsString       := oNodeItem.ChildNodes['ambientes'].Text;
+                                oQry.ParamByName('cozinhas').AsString        := oNodeItem.ChildNodes['cozinhas'].Text;
+                                oQry.ParamByName('wc').AsString              := oNodeItem.ChildNodes['wc'].Text;
+                                oQry.ParamByName('lavabo').AsString          := oNodeItem.ChildNodes['lavabo'].Text;
+                                oQry.ParamByName('piscina').AsString         := oNodeItem.ChildNodes['piscina'].Text;
+                                oQry.ParamByName('garagem').AsString         := oNodeItem.ChildNodes['garagem'].Text;
+                                oQry.ParamByName('telefone').AsString        := oNodeItem.ChildNodes['telefone'].Text;
+                                oQry.ParamByName('data').AsString            := FormatDateTime('dd/mm/yyyy', Date);
+                                oQry.ParamByName('cod_usuario').AsString     := IntToStr(idImobiliaria);
+                                OQry.ParamByName('views').AsString           := '0';
+                                oQry.ParamByName('status').AsString          := 'Ativo';
+                                oQry.ParamByName('aprovado').AsString        := 'SIM';
+                                oQry.ParamByName('valor').AsFloat            := StrToFloat(oNodeItem.ChildNodes['valor'].Text);
+                                oQry.ParamByName('bairro').AsString          := oNodeItem.ChildNodes['bairro'].Text;
+                                oQry.ExecSQL();
+                           end
+                           else
+                           begin
+                               // Atualiza os registros no banco de dados
+                                oQry.Close;
+                                oQry.SQL.Clear;
+                                oQry.SQL.Add('UPDATE imoveis2 SET categoria=:categoria, tipo=:tipo, cidade=:cidade, endereco=:endereco, titulo=:titulo, descricao=:descricao, cond_pag=:cond_pag, ');
+                                oQry.SQL.Add('area=:area, area_c=:area_c, quartos=:quartos, suites=:suites, tipo_construcao=:tipo_construcao, salas=:salas, ambientes=:ambientes, cozinhas=:cozinhas, ');
+                                oQry.SQL.Add('wc=:wc, lavabo=:lavabo, piscina=:piscina, garagem=:garagem, telefone=:telefone, data=:data, cod_usuario=:cod_usuario, views=:views, status=:status, aprovado=:aprovado, valor=:valor, bairro=:bairro ');
+                                oQry.SQL.Add('WHERE id_externo = :id_externo');
+                                oQry.ParamByName('categoria').AsString       := oNodeItem.ChildNodes['categoria'].Text;
+                                oQry.ParamByName('tipo').AsString            := oNodeItem.ChildNodes['tipo'].Text;
+                                oQry.ParamByName('cidade').AsString          := oNodeItem.ChildNodes['cidade'].Text;
+                                oQry.ParamByName('endereco').AsString        := oNodeItem.ChildNodes['endereco'].Text;
+                                oQry.ParamByName('titulo').AsString          := oNodeItem.ChildNodes['title'].Text;
+                                oQry.ParamByName('descricao').AsString       := oNodeItem.ChildNodes['descricao'].Text;
+                                oQry.ParamByName('cond_pag').AsString        := oNodeItem.ChildNodes['cond_pag'].Text;
+                                oQry.ParamByName('area').AsString            := oNodeItem.ChildNodes['area'].Text;
+                                oQry.ParamByName('area_c').AsString          := oNodeItem.ChildNodes['area_c'].Text;
+                                oQry.ParamByName('quartos').AsString         := oNodeItem.ChildNodes['quartos'].Text;
+                                oQry.ParamByName('suites').AsString          := oNodeItem.ChildNodes['suites'].Text;
+                                oQry.ParamByName('tipo_construcao').AsString := oNodeItem.ChildNodes['tipo_construcao'].Text;
+                                oQry.ParamByName('salas').AsString           := oNodeItem.ChildNodes['salas'].Text;
+                                oQry.ParamByName('ambientes').AsString       := oNodeItem.ChildNodes['ambientes'].Text;
+                                oQry.ParamByName('cozinhas').AsString        := oNodeItem.ChildNodes['cozinhas'].Text;
+                                oQry.ParamByName('wc').AsString              := oNodeItem.ChildNodes['wc'].Text;
+                                oQry.ParamByName('lavabo').AsString          := oNodeItem.ChildNodes['lavabo'].Text;
+                                oQry.ParamByName('piscina').AsString         := oNodeItem.ChildNodes['piscina'].Text;
+                                oQry.ParamByName('garagem').AsString         := oNodeItem.ChildNodes['garagem'].Text;
+                                oQry.ParamByName('telefone').AsString        := oNodeItem.ChildNodes['telefone'].Text;
+                                oQry.ParamByName('data').AsString            := FormatDateTime('dd/mm/yyyy', Date);
+                                oQry.ParamByName('cod_usuario').AsString     := IntToStr(idImobiliaria);
+                                OQry.ParamByName('views').AsString           := '0';
+                                oQry.ParamByName('status').AsString          := 'Ativo';
+                                oQry.ParamByName('aprovado').AsString        := 'SIM';
+                                oQry.ParamByName('valor').AsFloat            := StrToFloat(oNodeItem.ChildNodes['valor'].Text);
+                                oQry.ParamByName('bairro').AsString          := oNodeItem.ChildNodes['bairro'].Text;
+                                oQry.ParamByName('id_externo').AsInteger     := StrToInt(oNodeItem.ChildNodes['guid'].Text);
+                                oQry.ExecSQL();
+                           end;
+
+                           oNodeFotos := oNodeitem.ChildNodes.FindNode('fotos');
+                           if oNodeFotos <> nil then
+                           begin
+                               oNodeFotos.ChildNodes.First;
+
+                               repeat
+                                    oNodeFoto := oNodeFotos.ChildNodes.FindNode('foto');
+                                    if oNodeFoto <> nil then
+                                    begin
+                                        oNodeFoto.ChildNodes.First;
+
+                                        repeat
+                                            // Processa as imagens do XML
+                                            Inc(iContIdFoto);
+
+                                            Randomize;
+                                            sNameImagem := IntToStr(Random(99999)) + '_' + FormatDateTime('yyyymmddhhmmss', Now) + '_' + IntToStr(iContIdFoto) + '.jpg';
+                                            Self.ProcessaImagem(oNodeFoto.ChildNodes['url_foto'].Text, sNameImagem, 0);
+
+                                            oNodeFoto := oNodeFoto.NextSibling;
+                                        until (oNodeFoto = nil) ;
+                                    end;
+
+                                    oNodeFotos := oNodeFotos.NextSibling;
+                               until (oNodeFotos = nil) or (not Terminated) ;
+                           end;
+
+                           // Contador para gravar a quantidade de registros lidos e gravados no banco de dados
+                           Inc(iContItem);
+
+                           oNodeItem := oNodeItem.NextSibling;
+                      until (oNodeItem = nil) or (not Terminated) ;
+
+                      oNodePai := oNodePai.NextSibling;
+                 until (oNodePai = nil) or (not Terminated) ;
+
+                 // Atribui hora final do processo
+                 tTimeFinal := Now;
+
+                 // Inseri os dados para finalização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, iContItem, iContFoto, Self.CalculaDuracao(tTimeInicial, tTimeFinal), 'F', 'Sucesso', sNomeXml);
+
+                 // Fecha Conexão com banco de dados do  portal
+                 Self.FConexaoPortal.Close;
+             except
+                 on E:Exception do
+                 begin
+                    MessageDlg('Erro ao importa XML padrão dogus: '#13 + 'Mensagem: ' + E.Message, mtError, [mbOK], 0);
+                    tTimeFinal := Now;
+                    self.AtualizaInfoTarefa(idImobiliaria, iContItem, iContFoto, Self.CalculaDuracao(tTimeInicial, tTimeFinal), 'C', 'Erro: ' + E.Message, sNomeXml);
+                    Self.FConexaoPortal.Close;
+                 end;
+             end;
+        finally
+           FreeAndNil(oXMLDoc);
+           FreeAndNil(Self.FConexaoPortal);
+           FCritical.Leave;
+        end;
+    end;
+end;}
+
+procedure ThreadImportacao.ImportaXMLDogus(idImobiliaria:integer);
+var
+   iDuracaoHora, iDuracaoMinuto, iDuracaoSegundos, iNumeroXml: integer;
+   oQry, oQryTemp: TSQLQuery;
+   oCds: TClientDataSet;
+   oProvider: TDataSetProvider;
+   tTimeInicial, tTimeFinal : TDateTime;
+   sNameImagem, sNomeXml: string;
+begin
+    if not Terminated then
+    begin
+        try
+             try
+                 // Inicializa as variáveis
+                 iContInserido  := 0;
+                 iContAtualizado:= 0;
+                 iContExcluido  := 0;
+                 iContFoto      := 0;
+                 iContTotalItem := 0;
+                 iContTotalFoto := 0;
+                 iContErroFoto  := 0;
+                 Self.LoadConfig;
+
+                 // Atribui a hora de início do processo
+                 tTimeInicial := Now;
+
+                 // Chama a função para baixar o aquivo XML
+                 Randomize;
+                 iNumeroXml := Random(99999);
+                 sNomeXml   := IntToStr(iNumeroXml) + '_xml.xml';
+                 Self.DownloadXML(FUrlXml, FPathXml, sNomeXml);
+
+                 // Verifica se o arquivo XML NÃO existe, ser verdadeiro gera uma exception e finaliza a rotina
+                 if not FileExists(FPathXml + sNomeXml) then
+                    raise Exception.Create('Arquivo XML não encontrado!');
+
+                 // Chama procedure para contar o total de imóveis e fotos no XML
+                 Self.ContaImoveisFotos(FPathXml + sNomeXml);
+
+                 // Chama procedure ler e gravar os dados do XML na tabela imoveis_xml
+                 Self.InseriTempXML(FPathXml + sNomeXml);
+
+                 // Chama a função para executar a conexão com o respectivo portal onde serão gravados os dados
+                 Self.ConectarPortal;
+                 oQryTemp := TSQLQuery.Create(nil);
+                 oQryTemp.SQLConnection := Self.FConexaoPortal;
+
+                 //////////////////////////// INÍCIO INSERT ////////////////////////////////////////////////////////////////////////////////
+
+                 // Inseri os dados para atualização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Comparando registros de imóveis para inclusão', '');
+
+                 // Filtra todos os registros que não existem na tabela imóveis2
+                 oQryTemp.Close;
+                 oQryTemp.SQL.Clear;
+                 oQryTemp.SQL.Add('SELECT id_externo, cod_usuario FROM imoveis_xml a where cod_usuario = :idTemp ');
+                 oQryTemp.SQL.Add('EXCEPT SELECT id_externo, cod_usuario FROM imoveis2 b WHERE cod_usuario = :idFixo ORDER BY id_externo');
+                 oQryTemp.ParamByName('idTemp').AsInteger := idImobiliaria;
+                 oQryTemp.ParamByName('idFixo').AsInteger := idImobiliaria;
+                 oQryTemp.Open;
+
+                 oQry := TSQLQuery.Create(nil);
+                 oQry.SQLConnection := Self.FConexaoPortal;
+
+                 if not oQryTemp.IsEmpty and not Terminated then
+                 begin
+                     // Inseri os dados para atualização da tarefa
+                     self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando inclusão de novos imóveis', '');
+
+                     oQryTemp.First;
+                     while not oQryTemp.Eof and not Terminated do
+                     begin
+                          // Inseri os registros no banco de dados
+                          oQry.Close;
+                          oQry.SQL.Clear;
+                          oQry.SQL.Add('INSERT INTO imoveis2(id_externo, categoria, tipo, cidade, endereco, titulo, descricao, cond_pag, area, area_c, quartos, suites, tipo_construcao, salas, ambientes, cozinhas, ');
+                          oQry.SQL.Add('wc, lavabo, piscina, garagem, telefone, data, cod_usuario, views, status, aprovado, valor, bairro) ');
+                          oQry.SQL.Add('SELECT id_externo, categoria, tipo, cidade, endereco, titulo, descricao, cond_pag, area, area_c, quartos, suites, tipo_construcao, salas, ambientes, cozinhas, ');
+                          oQry.SQL.Add('wc, lavabo, piscina, garagem, telefone, data, cod_usuario, views, status, aprovado, valor, bairro ');
+                          oQry.SQL.Add('FROM imoveis_xml WHERE id_externo = :idExterno');
+                          oQry.ParamByName('idExterno').AsInteger := oQryTemp.FieldByName('id_externo').AsInteger;
+                          oQry.ExecSQL();
+
+                          Inc(iContInserido);
+                          oQryTemp.Next;
+                     end;
+                 end;
+
+                 //////////////////////////// FIM INSERT ////////////////////////////////////////////////////////////////////////////////
+
+
+                 //////////////////////////// INÍCIO UPDATE ////////////////////////////////////////////////////////////////////////////////
+
+                 // Inseri os dados para finalização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Comparando registro de imóveis para atualização', '');
+
+                 // Filtra todos os registros que são diferentes da tabela imóveis2
+                 dm.qryAux.Close;
+                 dm.qryAux.SQLConnection := Self.FConexaoPortal;
+                 dm.qryAux.SQL.Clear;
+                 dm.qryAux.SQL.Add('SELECT id_externo, categoria, tipo, cidade, endereco, titulo, descricao, cond_pag, area, area_c, quartos, suites, tipo_construcao, salas, ambientes, cozinhas, ');
+                 dm.qryAux.SQL.Add('wc, lavabo, piscina, garagem, telefone, data, cod_usuario, views, status, aprovado, valor, bairro FROM imoveis_xml A ');
+                 dm.qryAux.SQL.Add('EXCEPT SELECT id_externo, categoria, tipo, cidade, endereco, titulo, descricao, cond_pag, area, area_c, quartos, suites, tipo_construcao, salas, ambientes, cozinhas, ');
+                 dm.qryAux.SQL.Add('wc, lavabo, piscina, garagem, telefone, data, cod_usuario, views, status, aprovado, valor, bairro FROM imoveis2 B ORDER BY id_externo');
+                 dm.qryAux.Open;
+
+                 // Abri o ClientDataSet
+                 dm.cdsAux.Open;
+
+                 if not dm.cdsAux.IsEmpty and not Terminated then
+                 begin
+                      // Inseri os dados para finalização da tarefa
+                      self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando atualização de imóveis já existentes', '');
+
+                      dm.cdsAux.First;
+                      while not dm.cdsAux.Eof and not Terminated do
+                      begin
+                          // Atualiza os registros no banco de dados
+                          oQry.Close;
+                          oQry.SQL.Clear;
+                          oQry.SQL.Add('UPDATE imoveis2 SET categoria=:categoria, tipo=:tipo, cidade=:cidade, endereco=:endereco, titulo=:titulo, descricao=:descricao, cond_pag=:cond_pag, ');
+                          oQry.SQL.Add('area=:area, area_c=:area_c, quartos=:quartos, suites=:suites, tipo_construcao=:tipo_construcao, salas=:salas, ambientes=:ambientes, cozinhas=:cozinhas, ');
+                          oQry.SQL.Add('wc=:wc, lavabo=:lavabo, piscina=:piscina, garagem=:garagem, telefone=:telefone, data=:data, cod_usuario=:cod_usuario, views=:views, status=:status, aprovado=:aprovado, valor=:valor, bairro=:bairro ');
+                          oQry.SQL.Add('WHERE id_externo = :id_externo');
+                          oQry.ParamByName('categoria').AsString       := dm.cdsAux.FieldByName('categoria').AsString;
+                          oQry.ParamByName('tipo').AsString            := dm.cdsAux.FieldByName('tipo').Text;
+                          oQry.ParamByName('cidade').AsString          := dm.cdsAux.FieldByName('cidade').Text;
+                          oQry.ParamByName('endereco').AsString        := dm.cdsAux.FieldByName('endereco').Text;
+                          oQry.ParamByName('titulo').AsString          := dm.cdsAux.FieldByName('titulo').Text;
+                          oQry.ParamByName('descricao').AsString       := dm.cdsAux.FieldByName('descricao').Text;
+                          oQry.ParamByName('cond_pag').AsString        := dm.cdsAux.FieldByName('cond_pag').Text;
+                          oQry.ParamByName('area').AsString            := dm.cdsAux.FieldByName('area').Text;
+                          oQry.ParamByName('area_c').AsString          := dm.cdsAux.FieldByName('area_c').Text;
+                          oQry.ParamByName('quartos').AsString         := dm.cdsAux.FieldByName('quartos').Text;
+                          oQry.ParamByName('suites').AsString          := dm.cdsAux.FieldByName('suites').Text;
+                          oQry.ParamByName('tipo_construcao').AsString := dm.cdsAux.FieldByName('tipo_construcao').Text;
+                          oQry.ParamByName('salas').AsString           := dm.cdsAux.FieldByName('salas').Text;
+                          oQry.ParamByName('ambientes').AsString       := dm.cdsAux.FieldByName('ambientes').Text;
+                          oQry.ParamByName('cozinhas').AsString        := dm.cdsAux.FieldByName('cozinhas').Text;
+                          oQry.ParamByName('wc').AsString              := dm.cdsAux.FieldByName('wc').Text;
+                          oQry.ParamByName('lavabo').AsString          := dm.cdsAux.FieldByName('lavabo').Text;
+                          oQry.ParamByName('piscina').AsString         := dm.cdsAux.FieldByName('piscina').Text;
+                          oQry.ParamByName('garagem').AsString         := dm.cdsAux.FieldByName('garagem').Text;
+                          oQry.ParamByName('telefone').AsString        := dm.cdsAux.FieldByName('telefone').Text;
+                          oQry.ParamByName('data').AsString            := dm.cdsAux.FieldByName('data').Text;
+                          oQry.ParamByName('cod_usuario').AsString     := IntToStr(FIdImobiliaria);
+                          OQry.ParamByName('views').AsString           := '0';
+                          oQry.ParamByName('status').AsString          := 'Ativo';
+                          oQry.ParamByName('aprovado').AsString        := 'SIM';
+                          oQry.ParamByName('valor').AsFloat            := StrToFloat(dm.cdsAux.FieldByName('valor').Text);
+                          oQry.ParamByName('bairro').AsString          := dm.cdsAux.FieldByName('bairro').Text;;
+                          oQry.ParamByName('id_externo').AsInteger     := StrToInt(dm.cdsAux.FieldByName('id_externo').Text);
+                          oQry.ExecSQL();
+
+                          Inc(iContAtualizado);
+                          dm.cdsAux.Next;
+                      end;
+                 end;
+
+                 //////////////////////////// FIM UPDATE ////////////////////////////////////////////////////////////////////////////////
+
+
+                 //////////////////////////// INÍCIO DELETE ////////////////////////////////////////////////////////////////////////////////
+
+                 // Inseri os dados para finalização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Comparando registro de imóveis para exclusão', '');
+
+                 // Filtra todos os registros que não existem na tabela imóveis_xml
+                 oQryTemp.Close;
+                 oQryTemp.SQL.Clear;
+                 oQryTemp.SQL.Add('SELECT id_externo, cod_usuario FROM imoveis2 a where cod_usuario = :idTemp ');
+                 oQryTemp.SQL.Add('EXCEPT SELECT id_externo, cod_usuario FROM imoveis_xml b WHERE cod_usuario = :idFixo ORDER BY id_externo');
+                 oQryTemp.ParamByName('idTemp').AsInteger := idImobiliaria;
+                 oQryTemp.ParamByName('idFixo').AsInteger := idImobiliaria;
+                 oQryTemp.Open;
+
+                 if not oQryTemp.IsEmpty and not Terminated then
+                 begin
+                      // Inseri os dados para finalização da tarefa
+                      self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando exclusão de imóveis', '');
+
+                      oQryTemp.First;
+                      while not oQryTemp.Eof and not Terminated do
+                      begin
+                          oQry.Close;
+                          oQry.SQL.Clear;
+                          oQry.SQL.Add('DELETE FROM imoveis2 WHERE id_externo = :idTemp');
+                          oQry.ParamByName('idTemp').AsInteger := oQryTemp.FieldByName('id_externo').AsInteger;
+                          oQry.ExecSQL();
+
+                          Inc(iContExcluido);
+                          oQryTemp.Next;
+                      end;
+                 end;
+
+                 //////////////////////////// FIM DELETE ////////////////////////////////////////////////////////////////////////////////
+
+                 // Inseri os dados para finalização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Limpando tabela temporária de imóveis', '');
+
+                 // Limpa a tabela imoveis_xml
+                 oQry.Close;
+                 oQry.SQL.Clear;
+                 oQry.SQL.Add('DELETE FROM imoveis_xml');
+                 oQry.ExecSQL();
+
+                 // Chama a procedure para ler e processar todas as imagens do XML
+                 Self.ProcessaImagemDogus(FPathXml + sNomeXml);
+
+                 // Atribui hora final do processo
+                 tTimeFinal := Now;
+
+                 // Inseri os dados para finalização da tarefa
+                 self.AtualizaInfoTarefa(FIdAgendameto, Self.CalculaDuracao(tTimeInicial, tTimeFinal), 'F', 'Sucesso', sNomeXml);
+
+                 // Fecha Conexão com banco de dados do  portal
+                 Self.FConexaoPortal.Close;
+             except
+                 on E:Exception do
+                 begin
+                    MessageDlg('Erro ao importa XML padrão dogus: '#13 + 'Mensagem: ' + E.Message, mtError, [mbOK], 0);
+                    tTimeFinal := Now;
+                    self.AtualizaInfoTarefa(idImobiliaria, Self.CalculaDuracao(tTimeInicial, tTimeFinal), 'C', 'Erro: ' + E.Message, sNomeXml);
+                    Self.FConexaoPortal.Close;
+                 end;
+             end;
+        finally
+           FreeAndNil(Self.FConexaoPortal);
+           FreeAndNil(oQry);
+           FreeAndNil(oQryTemp);
+        end;
+    end;
+end;
+
+procedure ThreadImportacao.InseriTempXML(pathXML: string);
+var
+   oNodePai, oNodeItem, oNodeFotos, oNodeFoto : IXMLNode;
+   oXMLDoc: TXMLDocument;
+   oQry, oQryImg: TSQLQuery;
+   sNameImagem: string;
+   iIdExterno: Integer;
+begin
+    if not Terminated then
+    begin
+        try
+             try
+                 // Instância o objeto XMLDocument e carrega o arquivo XML
+                 oXMLDoc := TXMLDocument.Create(Application);
+                 oXMLDoc.FileName := pathXML;
+                 oXMLDoc.Active := True;
+
+                 // Chama a função para executar a conexão com o respectivo portal onde serão gravados os dados
+                 Self.ConectarPortal;
+                 oQry := TSQLQuery.Create(nil);
+                 oQry.SQLConnection := Self.FConexaoPortal;
+
+                 oQryImg := TSQLQuery.Create(nil);
+                 oQryImg.SQLConnection := Self.FConexaoPortal;
+
+                 // Identifica o Node principal do XML
+                 oNodePai := oXMLDoc.DocumentElement.ChildNodes.FindNode('channel');
+                 repeat
+                      oNodeItem := oNodePai.ChildNodes.FindNode('item');
+                      oNodeItem.ChildNodes.First;
+
+                      // Inseri os dados para atualização da tarefa
+                      self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando inclusões temporárias de imóveis', '');
+                      repeat
+                            iIdExterno := StrToInt(oNodeItem.ChildNodes['guid'].Text);
+
+                            // Grava os imóveis no banco de dados
+                            oQry.Close;
+                            oQry.SQL.Clear;
+                            oQry.SQL.Add('INSERT INTO imoveis_xml (id_externo, categoria, tipo, cidade, endereco, titulo, descricao, cond_pag, area, area_c, quartos, suites, tipo_construcao, salas, ambientes, cozinhas, ');
+                            oQry.SQL.Add('wc, lavabo, piscina, garagem, telefone, data, cod_usuario, views, status, aprovado, valor, bairro)VALUES');
+                            oQry.SQL.Add('(:id_externo, :categoria, :tipo, :cidade, :endereco, :titulo, :descricao, :cond_pag, :area, :area_c, :quartos, :suites, :tipo_construcao, :salas, :ambientes, :cozinhas, ');
+                            oQry.SQL.Add(':wc, :lavabo, :piscina, :garagem, :telefone, :data, :cod_usuario, :views, :status, :aprovado, :valor, :bairro)');
+                            oQry.ParamByName('id_externo').AsInteger     := StrToInt(oNodeItem.ChildNodes['guid'].Text);
+                            oQry.ParamByName('categoria').AsString       := oNodeItem.ChildNodes['categoria'].Text;
+                            oQry.ParamByName('tipo').AsString            := oNodeItem.ChildNodes['tipo'].Text;
+                            oQry.ParamByName('cidade').AsString          := oNodeItem.ChildNodes['cidade'].Text;
+                            oQry.ParamByName('endereco').AsString        := oNodeItem.ChildNodes['endereco'].Text;
+                            oQry.ParamByName('titulo').AsString          := oNodeItem.ChildNodes['title'].Text;
+                            oQry.ParamByName('descricao').AsString       := oNodeItem.ChildNodes['descricao'].Text;
+                            oQry.ParamByName('cond_pag').AsString        := oNodeItem.ChildNodes['cond_pag'].Text;
+                            oQry.ParamByName('area').AsString            := oNodeItem.ChildNodes['area'].Text;
+                            oQry.ParamByName('area_c').AsString          := oNodeItem.ChildNodes['area_c'].Text;
+                            oQry.ParamByName('quartos').AsString         := oNodeItem.ChildNodes['quartos'].Text;
+                            oQry.ParamByName('suites').AsString          := oNodeItem.ChildNodes['suites'].Text;
+                            oQry.ParamByName('tipo_construcao').AsString := oNodeItem.ChildNodes['tipo_construcao'].Text;
+                            oQry.ParamByName('salas').AsString           := oNodeItem.ChildNodes['salas'].Text;
+                            oQry.ParamByName('ambientes').AsString       := oNodeItem.ChildNodes['ambientes'].Text;
+                            oQry.ParamByName('cozinhas').AsString        := oNodeItem.ChildNodes['cozinhas'].Text;
+                            oQry.ParamByName('wc').AsString              := oNodeItem.ChildNodes['wc'].Text;
+                            oQry.ParamByName('lavabo').AsString          := oNodeItem.ChildNodes['lavabo'].Text;
+                            oQry.ParamByName('piscina').AsString         := oNodeItem.ChildNodes['piscina'].Text;
+                            oQry.ParamByName('garagem').AsString         := oNodeItem.ChildNodes['garagem'].Text;
+                            oQry.ParamByName('telefone').AsString        := oNodeItem.ChildNodes['telefone'].Text;
+                            oQry.ParamByName('data').AsString            := FormatDateTime('dd/mm/yyyy', Date);
+                            oQry.ParamByName('cod_usuario').AsString     := IntToStr(FIdImobiliaria);
+                            OQry.ParamByName('views').AsString           := '0';
+                            oQry.ParamByName('status').AsString          := 'Ativo';
+                            oQry.ParamByName('aprovado').AsString        := 'SIM';
+                            oQry.ParamByName('valor').AsFloat            := StrToFloat(oNodeItem.ChildNodes['valor'].Text);
+                            oQry.ParamByName('bairro').AsString          := oNodeItem.ChildNodes['bairro'].Text;
+                            oQry.ExecSQL();
+
+                            oNodeFotos := oNodeitem.ChildNodes.FindNode('fotos');
+                            if oNodeFotos <> nil then
+                            begin
+                                 oNodeFotos.ChildNodes.First;
+
+                                 repeat
+                                      oNodeFoto := oNodeFotos.ChildNodes.FindNode('foto');
+                                      if oNodeFoto <> nil then
+                                      begin
+                                          oNodeFoto.ChildNodes.First;
+
+                                          // Inseri os dados para atualização da tarefa
+                                          self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando inclusões temporárias de imagens', '');
+                                          repeat
+
+                                              if not Self.FConexaoPortal.Connected then
+                                                 Self.ConectarPortal;
+
+                                              oQryImg.Close;
+                                              oQryImg.SQL.Clear;
+                                              oQryImg.SQL.Add('INSERT INTO imoveis_fotos_xml (id_imovel, destaque, cod_imobiliaria, data, id_externo, url_foto, processada, nova)VALUES');
+                                              oQryImg.SQL.Add('(:id_imovel, :destaque, :cod_imobiliaria, :data, :id_externo, :url_foto, :processada, :nova)');
+                                              oQryImg.ParamByName('id_imovel').AsInteger       := 0; /////
+                                              oQryImg.ParamByName('destaque').AsString         := 'NAO'; //////
+                                              oQryImg.ParamByName('cod_imobiliaria').AsInteger := Self.FIdImobiliaria;
+                                              oQryImg.ParamByName('data').AsString             := FormatDateTime('dd/mm/yyyy', Date);
+                                              oQryImg.ParamByName('id_externo').AsInteger      := iIdExterno;
+                                              oQryImg.ParamByName('url_foto').AsString         := oNodeFoto.ChildNodes['url_foto'].Text;
+                                              oQryImg.ParamByName('processada').AsString       := 'NAO';  //////
+                                              oQryImg.ParamByName('nova').AsString             := 'NAO';  //////
+                                              oQryImg.ExecSQL();
+
+                                              oNodeFoto := oNodeFoto.NextSibling;
+                                          until (oNodeFoto = nil) or (Terminated) ;
+                                      end;
+
+                                      oNodeFotos := oNodeFotos.NextSibling;
+                                 until (oNodeFotos = nil) or (Terminated) ;
+                            end;
+
+                            oNodeItem := oNodeItem.NextSibling;
+                      until (oNodeItem = nil) or (Terminated) ;
+
+                      oNodePai := oNodePai.NextSibling;
+                 until (oNodePai = nil) or (Terminated) ;
+
+                 // Fecha Conexão com banco de dados do  portal
+                 Self.FConexaoPortal.Close;
+             except
+                 on E:Exception do
+                 begin
+                    MessageDlg('Erro ao inserir dados na tabela temporária: '#13 + E.Message, mtError, [mbOK], 0);
+                    Self.FConexaoPortal.Close;
+                 end;
+             end;
+        finally
+           FreeAndNil(oXMLDoc);
+           FreeAndNil(oQry);
+           FreeAndNil(oQryImg);
+        end;
+    end;
+end;
+
+// Método para carregar os dados de conexão com o banco de dados do portal
+procedure ThreadImportacao.LoadConfig;
+var
+   oQry: TSQLQuery;
+begin
+    try
+        oQry := TSQLQuery.Create(nil);
+        oQry.SQLConnection := Self.getConexaoAux;
+        oQry.Close;
+        oQry.SQL.Clear;
+        oQry.SQL.Add('SELECT id, idImobiliaria, idUsuario, portal, urlXml, pathXml,  pathImagem, marcaAgua, pathMarcaAgua FROM TAB_IMOBILIARIA WHERE id = :id AND registro = :registro');
+        oQry.ParamByName('id').AsInteger      := Self.FIdImobiliaria;
+        oQry.ParamByName('registro').AsString := 'A';
+        oQry.Open;
+
+        if not oQry.IsEmpty then
+        begin
+            FPortal        := oQry.FieldByName('portal').AsString;
+            FUrlXml        := oQry.FieldByName('urlXml').AsString;
+            FPathXml       := oQry.FieldByName('pathXml').AsString;
+            FPathImagem    := oQry.FieldByName('pathImagem').AsString;
+            FPathMarcaAgua := oQry.FieldByName('pathMarcaAgua').AsString;
+            FNomeMarcaAgua := oQry.FieldByName('marcaAgua').AsString;
+        end;
+    finally
+        Self.ConexaoAux.Close;
+        FreeAndNil(oQry);
+    end;
+end;
+
+// Método que adiciona a marca d' água na imagem
+procedure ThreadImportacao.CombineImage(var Img: TJPEGImage ;const ATopLeftPos: TPoint;
+  const AImgMarca: string);
+var
+  vPicPai, vPicMarca: TPicture;
+  vSrcPai, vSrcMarca: TGraphic;
+  FTmpPai : TBitmap;
+begin
+
+    vPicPai := TPicture.Create;
+    vPicMarca := TPicture.Create;
+    FTmpPai := TBitmap.Create;
+    try
+        try
+            vPicPai.Assign(Img);
+            vSrcPai := vPicPai.Graphic;
+            vPicMarca.LoadFromFile(AImgMarca);
+            vSrcMarca := vPicMarca.Graphic;
+
+            FTmpPai.Width  := vSrcPai.Width;
+            FTmpPai.Height := vSrcPai.Height;
+            FTmpPai.Canvas.Draw(0, 0, vSrcPai);
+            FTmpPai.Canvas.Draw(ATopLeftPos.X, ATopLeftPos.Y, vSrcMarca);
+
+            Img.Assign(FTmpPai);
+        except
+            on E:Exception do
+            MessageDlg('Erro ao processar marca d´água : ' + E.Message, mtError, [mbOK], 0);
+        end;
+    finally
+        FreeAndNil(vPicPai);
+        FreeAndNil(vPicMarca);
+        FreeAndNil(FTmpPai);
+    end;
+end;
+
+// Procedure faz o download da imagem e chama as funções para processamento
+{procedure ThreadImportacao.ProcessaImagemDogus(pathXML: string);
+var
+  oMs: TMemoryStream;
+  oHTTP: TIdHTTP;
+  oNodePai, oNodeItem, oNodeFotos, oNodeFoto: IXMLNode;
+  oXMLDoc: TXMLDocument;
+  sNameImagem, url:  string;
+  oQryTemp, oQry: TSQLQuery;
+begin
+     // Inseri os dados para atualização da tarefa
+     self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Iniciando leitura das imagens no XML', '');
+     oMs   := TMemoryStream.Create;
+     oHTTP := TIdHTTP.Create(nil);
+     try
+          try
+               // Instância o objeto XMLDocument e carrega o arquivo XML
+               oXMLDoc := TXMLDocument.Create(Application);
+               oXMLDoc.FileName := pathXML;
+               oXMLDoc.Active := True;
+
+               // Identifica o Node principal do XML
+               oNodePai := oXMLDoc.DocumentElement.ChildNodes.FindNode('channel');
+               repeat
+                    oNodeItem := oNodePai.ChildNodes.FindNode('item');
+                    oNodeItem.ChildNodes.First;
+
+                    repeat
+                         oNodeFotos := oNodeitem.ChildNodes.FindNode('fotos');
+                         if oNodeFotos <> nil then
+                         begin
+                             oNodeFotos.ChildNodes.First;
+
+                             repeat
+                                  oNodeFoto := oNodeFotos.ChildNodes.FindNode('foto');
+                                  if oNodeFoto <> nil then
+                                  begin
+                                      oNodeFoto.ChildNodes.First;
+
+                                      repeat
+                                          // Processa as imagens do XML
+                                          try
+                                               // Inseri os dados para finalização da tarefa
+                                               self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Processando imagens', '');
+
+                                              oMs.Clear;
+                                              try
+                                                  url := StringReplace(oNodeFoto.ChildNodes['url_foto'].Text, ' ', '%20',[rfReplaceAll]);
+                                                  oHTTP.Get(url, oMs);
+                                              except
+                                                  Inc(iContErroFoto);
+                                              end;
+                                              oMs.Position := 0;
+
+                                              // Verifica se a pasta para gravar as imagens não existe, se verdadeiro cria a pasta
+                                              if not DirectoryExists(FPathImagem) then
+                                                 ForceDirectories(FPathImagem);
+
+                                              if oMs.Size > 0 then
+                                              begin
+                                                  sNameImagem := IntToStr(Random(99999)) + '_' + FormatDateTime('yyyymmddhhmmss', Now) + '_' + IntToStr(iContFoto) + '.jpg';
+                                                  oMs.SaveToFile(FPathImagem + 'temp_'+sNameImagem);
+
+                                                  // Redimensiona e grava novamente as imagens no diretório atual
+                                                  Self.ResizeImage(FPathImagem + 'temp_'+sNameImagem, 'small_' + sNameImagem, 153, 115);
+                                                  Self.ResizeImage(FPathImagem + 'temp_'+sNameImagem, 'mobile_' + sNameImagem, 310, 180);
+                                                  Self.ResizeImage(FPathImagem + 'temp_'+sNameImagem, sNameImagem, 0, 0);
+                                                  DeleteFile(FPathImagem + 'temp_'+sNameImagem);
+                                              end;
+
+                                              Application.ProcessMessages;
+                                          except
+                                              on E:Exception do
+                                              MessageDlg('Erro ao processar imagens: ' + E.Message, mtError, [mbOK], 0);
+                                          end;
+
+                                          oNodeFoto := oNodeFoto.NextSibling;
+                                      until (oNodeFoto = nil) or (Terminated) ;
+                                  end;
+
+                                  oNodeFotos := oNodeFotos.NextSibling;
+                             until (oNodeFotos = nil) or (Terminated) ;
+                         end;
+
+                         oNodeItem := oNodeItem.NextSibling;
+                    until (oNodeItem = nil) or (Terminated) ;
+
+                    oNodePai := oNodePai.NextSibling;
+               until (oNodePai = nil) or (Terminated) ;
+          except
+
+          end;
+     finally
+        FreeAndNil(oXMLDoc);
+        FreeAndNil(oMs);
+        FreeAndNil(oHTTP);
+     end;
+end;}
+
+procedure ThreadImportacao.ProcessaImagemDogus(pathXML: string);
+var
+  oMs: TMemoryStream;
+  oHTTP: TIdHTTP;
+  oNodePai, oNodeItem, oNodeFotos, oNodeFoto: IXMLNode;
+  oXMLDoc: TXMLDocument;
+  sNameImagem, url:  string;
+  oQryTemp, oQry: TSQLQuery;
+  idExterno, iContIdFoto: Integer;
+begin
+     oMs   := TMemoryStream.Create;
+     oHTTP := TIdHTTP.Create(nil);
+     try
+          // Processa as imagens do XML
+          try
+               // Chama a função para executar a conexão com o respectivo portal onde serão gravados os dados
+               Self.ConectarPortal;
+               oQryTemp := TSQLQuery.Create(nil);
+               oQryTemp.SQLConnection := Self.FConexaoPortal;
+
+               // Inseri os dados para atualização da tarefa
+               self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Comparando registros de imagens para inclusão', '');
+
+               //////////////////////////// INÍCIO INSERT ////////////////////////////////////////////////////////////////////////////////
+
+               // Filtra todos os registros que não existem na tabela imoveis_fotos2
+               oQryTemp.Close;
+               oQryTemp.SQL.Clear;
+               oQryTemp.SQL.Add('SELECT id_externo, url_foto FROM imoveis_fotos_xml a where cod_imobiliaria = :idTemp ');
+               oQryTemp.SQL.Add('EXCEPT SELECT id_externo, url_foto FROM imoveis_fotos2 b WHERE cod_imobiliaria = :idFixo ORDER BY id_externo');
+               oQryTemp.ParamByName('idTemp').AsInteger := FIdImobiliaria;
+               oQryTemp.ParamByName('idFixo').AsInteger := FIdImobiliaria;
+               oQryTemp.Open;
+
+               oQry := TSQLQuery.Create(nil);
+               oQry.SQLConnection := Self.FConexaoPortal;
+
+               if not oQryTemp.IsEmpty and not Terminated then
+               begin
+                   // Inseri os dados para atualização da tarefa
+                   self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando inclusão de novas imagens', '');
+
+                   iContIdFoto := 1;
+                   oQryTemp.First;
+                   while not oQryTemp.Eof and not Terminated do
+                   begin
+                        idExterno := oQryTemp.FieldByName('id_externo').AsInteger;
+                        oMs.Clear;
+                        try
+                            url := StringReplace(oQryTemp.FieldByName('url_foto').AsString, ' ', '%20',[rfReplaceAll]);
+                            oHTTP.Get(url, oMs);
+                        except
+                            Inc(iContErroFoto);
+                        end;
+                        oMs.Position := 0;
+
+                        // Verifica se a pasta para gravar as imagens não existe, se verdadeiro cria a pasta
+                        if not DirectoryExists(FPathImagem) then
+                           ForceDirectories(FPathImagem);
+
+                        // Verifica se o MemoryStream possui conteúdo
+                        if oMs.Size > 0 then
+                        begin
+                            sNameImagem := IntToStr(Random(99999)) + '_' + FormatDateTime('yyyymmddhhmmss', Now) + '_' + IntToStr(iContIdFoto) + '.jpg';
+                            oMs.SaveToFile(FPathImagem + 'temp_'+sNameImagem);
+
+                            // Redimensiona e grava novamente as imagens no diretório atual
+                            Self.ResizeImage(FPathImagem + 'temp_'+sNameImagem, 'small_' + sNameImagem, url, 153, 115, idExterno);
+                            Self.ResizeImage(FPathImagem + 'temp_'+sNameImagem, 'mobile_' + sNameImagem, url, 310, 180, idExterno);
+                            Self.ResizeImage(FPathImagem + 'temp_'+sNameImagem, sNameImagem, url, 0, 0, idExterno);
+                            DeleteFile(FPathImagem + 'temp_'+sNameImagem);
+                        end;
+
+                        Inc(iContIdFoto);
+                        oQryTemp.Next;
+                   end;
+               end;
+               //////////////////////////// FIM INSERT ///////////////////////////////////////////////////////////////////////////////////
+
+
+               //////////////////////////// INÍCIO DELETE ////////////////////////////////////////////////////////////////////////////////
+
+               // Inseri os dados para finalização da tarefa
+               self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Comparando registros de imagens para exclusão', '');
+
+               // Filtra todos os registros que não existem na tabela imóveis_fotos_xml
+               oQryTemp.Close;
+               oQryTemp.SQL.Clear;
+               oQryTemp.SQL.Add('SELECT url_foto, id_externo FROM imoveis_fotos2 a where cod_imobiliaria = :idTemp ');
+               oQryTemp.SQL.Add('EXCEPT SELECT url_foto, id_externo FROM imoveis_fotos_xml b WHERE cod_imobiliaria = :idFixo ORDER BY id_externo');
+               oQryTemp.ParamByName('idTemp').AsInteger := FIdImobiliaria;
+               oQryTemp.ParamByName('idFixo').AsInteger := FIdImobiliaria;
+               oQryTemp.Open;
+
+               if not oQryTemp.IsEmpty and not Terminated then
+               begin
+                    // Inseri os dados para finalização da tarefa
+                    self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Executando exclusão de imagens', '');
+
+                    oQryTemp.First;
+                    while not oQryTemp.Eof and not Terminated do
+                    begin
+                        dm.qryAux.SQLConnection := Self.FConexaoPortal;
+                        dm.qryAux.Close;
+                        dm.qryAux.SQL.Clear;
+                        dm.qryAux.SQL.Add('SELECT foto FROM imoveis_fotos2 WHERE url_foto = :url');
+                        dm.qryAux.ParamByName('url').AsString := oQryTemp.FieldByName('url_foto').AsString;
+                        dm.qryAux.Open;
+
+                        if not dm.qryAux.IsEmpty then
+                           DeleteFile(FPathImagem + dm.qryAux.FieldByName('foto').AsString);
+
+                        oQry.Close;
+                        oQry.SQL.Clear;
+                        oQry.SQL.Add('DELETE FROM imoveis_fotos2 WHERE url_foto = :url');
+                        oQry.ParamByName('url').AsString:= oQryTemp.FieldByName('url_foto').AsString;
+                        oQry.ExecSQL();
+
+                        oQryTemp.Next;
+                    end;
+                    Self.FConexaoPortal.Close;
+               end;
+
+               //////////////////////////// FIM DELETE /////////////////////////////////////////////////////////////////////////////////
+
+               // Inseri os dados para finalização da tarefa
+               self.AtualizaInfoTarefa(FIdAgendameto, '', 'E', 'Limpando tabela temporária de imagens', '');
+
+               // Limpa a tabela imoveis_xml
+               oQry.Close;
+               oQry.SQL.Clear;
+               oQry.SQL.Add('DELETE FROM imoveis_fotos_xml');
+               oQry.ExecSQL();
+
+              Application.ProcessMessages;
+          except
+              on E:Exception do
+              begin
+                  MessageDlg('Erro ao processar imagens: ' + E.Message, mtError, [mbOK], 0);
+                  self.AtualizaInfoTarefa(FIdImobiliaria, '', 'C', 'Erro: ' + E.Message, '');
+              end;
+          end;
+     finally
+          FreeAndNil(oXMLDoc);
+          FreeAndNil(oMs);
+          FreeAndNil(oHTTP);
+          dm.qryAux.Close;
+     end;
+end;
+
+// Procedure prepara o redimensionamento da imagem, adiciona marca d'água e grava chamando a função SaveJPEGPictureFile para gravar com baixa qualidade
+procedure ThreadImportacao.ResizeImage(FileName, nameImagem, urlFoto: string; largura, altura, idExterno: Integer);
+var
+  OldBitmap: TBitmap;
+  NewBitmap: TBitmap;
+  aWidth, aHeight: Integer;
+  JPEGImage: TJPEGImage;
+  oQry: TSQLQuery;
+begin
+    JPEGImage := TJPEGImage.Create;
+    JPEGImage.LoadFromFile(FileName);
+    OldBitmap := TBitmap.Create;
+    try
+        try
+            // Verifica se é imagem inteira e chama a função para adicionar marca d'água
+            if (largura = 0) and (altura = 0) then
+                Self.CombineImage(JPEGImage, Self.StrToCoord('5, 5'), FPathMarcaAgua + FNomeMarcaAgua);
+
+            OldBitmap.Assign(JPEGImage);
+            begin
+                if (largura = 0) and (altura = 0) then
+                begin
+                    if (OldBitmap.Width <= frmMonitoramento.FLAG_MAX_WIDTH) then
+                    begin
+                        aWidth  := OldBitmap.Width;
+                        aHeight := OldBitmap.Height;
+                    end
+                    else
+                    begin
+                        aWidth  := frmMonitoramento.FLAG_MAX_WIDTH;
+                        aHeight := Trunc(aWidth * OldBitmap.Height / OldBitmap.Width);
+                    end;
+                end
+                else
+                begin
+                    aWidth := largura;
+                    aHeight:= altura;
+                end;
+
+                NewBitmap := TBitmap.Create;
+                NewBitmap.Width := aWidth;
+                NewBitmap.Height := aHeight;
+                SmoothResize(OldBitmap, NewBitmap);
+
+                if SaveJPEGPictureFile(NewBitmap, ExtractFilePath(FileName), nameImagem, frmMonitoramento.FLAG_QUALITY_SM) then
+                begin
+                    // Inseri os registros no banco de dados
+                    oQry := TSQLQuery.Create(nil);
+                    oQry.SQLConnection := Self.FConexaoPortal;
+
+                    oQry.Close;
+                    oQry.SQL.Clear;
+                    oQry.SQL.Add('INSERT INTO imoveis_fotos2(id_imovel, destaque, foto, cod_imobiliaria, data, id_externo, url_foto) VALUES');
+                    oQry.SQL.Add('(:id_imovel, :destaque, :foto, :cod_imobiliaria, :data, :id_externo, :url_foto)');
+                    oQry.ParamByName('id_imovel').AsInteger       := 0;
+                    oQry.ParamByName('destaque').AsString         := 'NAO';
+                    oQry.ParamByName('foto').AsString             := nameImagem;
+                    oQry.ParamByName('cod_imobiliaria').AsInteger := Self.FIdImobiliaria;
+                    oQry.ParamByName('data').AsString             := FormatDateTime('dd/mm/yyyy', Date);
+                    oQry.ParamByName('id_externo').AsInteger      := idExterno;
+                    oQry.ParamByName('url_foto').AsString         := urlFoto;
+                    oQry.ExecSQL();
+
+                    Inc(iContFoto);
+                end;
+
+            end;
+        except
+            //on E:Exception do
+            //MessageDlg('Erro ao redimensionar imagens: ' + E.Message, mtError, [mbOK], 0);
+        end;
+    finally
+        FreeAndNil(NewBitmap);
+        FreeAndNil(OldBitmap);
+        FreeAndNil(JPEGImage);
+        FreeAndNil(oQry);
+    end;
+end;
+
+// Procedure para diminuir a qualidade da imagem e grava-lá
+function ThreadImportacao.SaveJPEGPictureFile(Bitmap: TBitmap; FilePath,FileName:string;
+  Quality: Integer): Boolean;
+begin
+    Result := True;
+    try
+        if ForceDirectories(FilePath) then
+        begin
+            with TJPegImage.Create do
+            begin
+                try
+                    Assign(Bitmap);
+                    CompressionQuality := Quality;
+                    if FileName = '' then
+                      SaveToFile(FilePath)
+                    else
+                      SaveToFile(FilePath + FileName);
+                finally
+                    Free;
+                end;
+            end;
+        end;
+    except
+        on E:Exception do
+        begin
+            MessageDlg('Erro ao gravar imagens sem marca d´água: ' + E.Message, mtError, [mbOK], 0);
+            Result := False;
+        end;
+    end;
+end;
+
+// Procedure para redimensionamento a imagem
+procedure ThreadImportacao.SmoothResize(Src, Dst: TBitmap);
+var
+  x, y: Integer;
+  xP, yP: Integer;
+  xP2, yP2: Integer;
+  SrcLine1, SrcLine2: pRGBArray;
+  t3: Integer;
+  z, z2, iz2: Integer;
+  DstLine: pRGBArray;
+  DstGap: Integer;
+  w1, w2, w3, w4: Integer;
+begin
+    Src.PixelFormat := pf24Bit;
+    Dst.PixelFormat := pf24Bit;
+
+    try
+        if (Src.Width = Dst.Width) and (Src.Height = Dst.Height) then
+            Dst.Assign(Src)
+        else
+        begin
+            DstLine := Dst.ScanLine[0];
+            DstGap := Integer(Dst.ScanLine[1]) - Integer(DstLine);
+
+            xP2 := MulDiv(pred(Src.Width), $10000, Dst.Width);
+            yP2 := MulDiv(pred(Src.Height), $10000, Dst.Height);
+            yP := 0;
+
+            for y := 0 to pred(Dst.Height) do
+            begin
+                xP := 0;
+
+                SrcLine1 := Src.ScanLine[yP shr 16];
+
+                if (yP shr 16 = pred(Src.Height)) then
+                    SrcLine2 := Src.ScanLine[succ(yP shr 16)]
+                else
+                    SrcLine2 := Src.ScanLine[yP shr 16];
+
+                z2 := succ(yP and $FFFF);
+                iz2 := succ((not yp) and $FFFF);
+                for x := 0 to pred(Dst.Width) do
+                begin
+                    t3 := xP shr 16;
+                    z := xP and $FFFF;
+                    w2 := MulDiv(z, iz2, $10000);
+                    w1 := iz2 - w2;
+                    w4 := MulDiv(z, z2, $10000);
+                    w3 := z2 - w4;
+                    DstLine[x].rgbtRed := (SrcLine1[t3].rgbtRed * w1 +
+                      SrcLine1[t3 + 1].rgbtRed * w2 +
+                      SrcLine2[t3].rgbtRed * w3 + SrcLine2[t3+1].rgbtRed * w4) shr 16;
+                    DstLine[x].rgbtGreen :=
+                      (SrcLine1[t3].rgbtGreen * w1 + SrcLine1[t3 +1].rgbtGreen * w2 +
+
+                      SrcLine2[t3].rgbtGreen*w3+SrcLine2[t3+1].rgbtGreen * w4) shr 16;
+                    DstLine[x].rgbtBlue := (SrcLine1[t3].rgbtBlue * w1 +
+                      SrcLine1[t3 + 1].rgbtBlue * w2 +
+                      SrcLine2[t3].rgbtBlue * w3 +
+                      SrcLine2[t3 + 1].rgbtBlue * w4) shr 16;
+                    Inc(xP, xP2);
+                end;
+                Inc(yP, yP2);
+                DstLine := pRGBArray(Integer(DstLine) + DstGap);
+            end;
+        end;
+    except
+        on E:Exception do
+        MessageDlg('Erro ao processar redimensionamento: ' + E.Message, mtError, [mbOK], 0);
+    end;
+end;
+
+// Função verifica se guid do imóvel já está cadastrado no banco de dados
+function ThreadImportacao.VerificaDuplicidadeImovel(Guid: integer): boolean;
+var
+  oQry: TSQLQuery;
+begin
+     try
+         try
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := Self.FConexaoPortal;
+             oQry.Close;
+             oQry.SQL.Clear;
+             oQry.SQL.Add('SELECT id FROM imoveis2 WHERE id_externo = :id');
+             oQry.ParamByName('id').AsInteger := Guid;
+             oQry.Open;
+
+             if oQry.IsEmpty then
+                Result := False
+             else
+                Result := True;
+         except
+             on E:Exception do
+             begin
+                MessageDlg('Erro ao verificar duplicidade de imóveis: ' + E.Message, mtError, [mbOK], 0);
+                Result := True;
+             end;
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+initialization
+  FCritical := TCriticalSection.Create;
+
+finalization
+  FreeAndNil(FCritical);
+
+end.

@@ -1,0 +1,121 @@
+object dm: Tdm
+  OldCreateOrder = False
+  OnCreate = DataModuleCreate
+  Left = 632
+  Top = 217
+  Height = 285
+  Width = 493
+  object conexaoMonitoramento: TSQLConnection
+    LoginPrompt = False
+    BeforeConnect = conexaoMonitoramentoBeforeConnect
+    Left = 336
+    Top = 24
+  end
+  object qryAgendamento: TSQLQuery
+    MaxBlobSize = -1
+    Params = <>
+    SQL.Strings = (
+      'SELECT * FROM TAB_AGENDAMENTO')
+    SQLConnection = conexaoMonitoramento
+    Left = 80
+    Top = 104
+    object qryAgendamentoid: TIntegerField
+      FieldName = 'id'
+    end
+    object qryAgendamentoidImobiliaria: TIntegerField
+      FieldName = 'idImobiliaria'
+      Required = True
+    end
+    object qryAgendamentoidUsuario: TIntegerField
+      FieldName = 'idUsuario'
+      Required = True
+    end
+    object qryAgendamentoidBancoDados: TIntegerField
+      FieldName = 'idBancoDados'
+      Required = True
+    end
+    object qryAgendamentorepeticao: TStringField
+      FieldName = 'repeticao'
+      Required = True
+      FixedChar = True
+      Size = 1
+    end
+    object qryAgendamentotipoXml: TStringField
+      FieldName = 'tipoXml'
+      Required = True
+      Size = 30
+    end
+    object qryAgendamentodataAgendamento: TDateField
+      FieldName = 'dataAgendamento'
+    end
+    object qryAgendamentohoraAgendamento: TStringField
+      FieldName = 'horaAgendamento'
+      FixedChar = True
+      Size = 10
+    end
+    object qryAgendamentodia: TStringField
+      FieldName = 'dia'
+      FixedChar = True
+      Size = 2
+    end
+    object qryAgendamentodiaSemana: TStringField
+      FieldName = 'diaSemana'
+      FixedChar = True
+      Size = 10
+    end
+    object qryAgendamentostatusAgendamento: TStringField
+      FieldName = 'statusAgendamento'
+      Required = True
+      FixedChar = True
+      Size = 1
+    end
+    object qryAgendamentodataCadastro: TDateField
+      FieldName = 'dataCadastro'
+      Required = True
+    end
+    object qryAgendamentoregistro: TStringField
+      FieldName = 'registro'
+      Required = True
+      FixedChar = True
+      Size = 1
+    end
+  end
+  object dspAgendamento: TDataSetProvider
+    DataSet = qryAgendamento
+    Left = 192
+    Top = 104
+  end
+  object cdsAgendamento: TClientDataSet
+    Aggregates = <>
+    Params = <>
+    ProviderName = 'dspAgendamento'
+    Left = 296
+    Top = 104
+  end
+  object dtsAgendamento: TDataSource
+    DataSet = cdsAgendamento
+    Left = 392
+    Top = 104
+  end
+  object qryAux: TSQLQuery
+    Params = <>
+    Left = 72
+    Top = 168
+  end
+  object dspAux: TDataSetProvider
+    DataSet = qryAux
+    Left = 192
+    Top = 168
+  end
+  object cdsAux: TClientDataSet
+    Aggregates = <>
+    Params = <>
+    ProviderName = 'dspAux'
+    Left = 296
+    Top = 168
+  end
+  object conexao: TSQLConnection
+    Left = 160
+    Top = 16
+  end
+end

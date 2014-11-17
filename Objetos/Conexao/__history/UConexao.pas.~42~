@@ -1,0 +1,135 @@
+unit UConexao;
+
+interface
+
+uses
+    IniFiles, SysUtils, Forms, SqlExpr, Dialogs;
+
+type
+   TConexao = class
+   private
+      Path: string;
+      Host: string;
+      Porta: integer;
+      Database: string;
+      Password: string;
+      User: string;
+      VendorLib: string;
+      LibraryC: string;
+      GetDriver: string;
+      Driver: string;
+      Connection: string;
+      Secao: string;
+      Charset: string;
+      Time: Integer;
+
+      FThreadSimultanea: Integer;
+      FQuality1 : Integer;
+      FQuality2 : Integer;
+      FMaxWidth : Integer;
+
+   public
+      constructor Create(Path: string; Secao: string);
+
+      procedure LeINI(); virtual;
+      procedure GravaINI(Usuario, Senha, Servidor, Banco: string); virtual;
+      procedure Conectar(var Conexao: TSQLConnection); virtual;
+      property Hostname: string read Host     write Host;
+      property Usuario:  string read User     write User;
+      property Senha:    string read Password write Password;
+      property Banco:    string read Database write Database;
+      property TimeOut:  Integer read Time write Time;
+      property Quality1:    Integer  read FQuality1 write FQuality1;
+      property MaxWidth:    Integer  read FMaxWidth write FMaxWidth;
+   end;
+
+
+implementation
+
+
+procedure TConexao.Conectar(var Conexao: TSQLConnection);
+begin
+     //Le o arquivo INI e carrega os valores nas respectivas variáveis
+     LeINI();
+
+     try
+        if (Conexao.DriverName = '') and (Conexao.GetDriverFunc = '') and (Conexao.LibraryName = '') then
+        begin
+            //Passa os parâmetros para o objeto Conexão
+            Conexao.Connected      := false;
+            Conexao.LoginPrompt    := false;
+            Conexao.ParamsLoaded   := True;
+            Conexao.DriverName     := Driver;
+            Conexao.GetDriverFunc  := GetDriver;
+            Conexao.LibraryName    := LibraryC;
+            Conexao.VendorLib      := VendorLib;
+            Conexao.Params.Clear;
+            Conexao.Params.Add('hostname='+ Host);
+            Conexao.Params.Add('user_name='+ User);
+            Conexao.Params.Add('password='+ Password);
+            Conexao.Params.Add('database='+ Database);
+            Conexao.Params.Add('connecttimeout='+ IntToStr(TimeOut));
+        end;
+     Except
+        //on E:Exception do
+        //ShowMessage('Erro ao carregar parâmetros de conexão!'#13#10 + E.Message);
+     end;
+end;
+
+constructor TConexao.Create(Path: string; Secao: string);
+begin
+    // Verifica se o arquivo INI existe
+    if FileExists(Path) then
+    begin
+       Self.Path := Path;
+       Self.Secao := Secao;
+    end
+    else
+       raise Exception.Create('Arquivo INI para configuração não encontrado.'#13#10'Aplicação será finalizada.');
+end;
+
+procedure TConexao.GravaINI(Usuario, Senha, Servidor, Banco: string);
+var
+    ArqIni : TIniFile;
+begin
+     ArqIni := TIniFile.Create(Path);
+     try
+        //Carrega valores para conexão com banco de dados
+        ArqIni.WriteString(Secao, 'user_name', Usuario);
+        ArqIni.WriteString(Secao, 'Password', Senha);
+        ArqIni.WriteString(Secao, 'Database', Banco);
+        ArqIni.WriteString(Secao, 'Hostname', Servidor);
+     finally
+         ArqIni.Free;
+     end;
+end;
+
+procedure TConexao.LeINI();
+var
+    ArqIni : TIniFile;
+begin
+     ArqIni := TIniFile.Create(Path);
+     try
+        //Carrega valores para conexão com banco de dados
+        Host        := ArqIni.ReadString(Secao, 'Hostname', '');
+        Database    := ArqIni.ReadString(Secao, 'Database', '');
+        Password    := ArqIni.ReadString(Secao, 'Password', '');
+        User        := ArqIni.ReadString(Secao, 'user_name', '');
+        VendorLib   := ArqIni.ReadString(Secao, 'VendorLib', '');
+        LibraryC    := ArqIni.ReadString(Secao, 'LibraryName', '');
+        GetDriver   := ArqIni.ReadString(Secao, 'GetDriveFunc', '');
+        Driver      := ArqIni.ReadString(Secao, 'drivername', '');
+        Charset     := ArqIni.ReadString(Secao, 'charset', '');
+        TimeOut     := ArqIni.ReadInteger(Secao, 'TimeOut', 0);
+
+        //Carrega valores para qualidade das imagens
+        FQuality1 := ArqIni.ReadInteger('Qualidade', 'Quality1', 0);
+
+        // Carrega valor máximo de largura
+        FMaxWidth := ArqIni.ReadInteger('Dimensao', 'MaxWidth', 0);
+     finally
+         ArqIni.Free;
+     end;
+end;
+
+end.

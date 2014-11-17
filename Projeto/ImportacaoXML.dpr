@@ -1,0 +1,23 @@
+program ImportacaoXML;
+
+uses
+  Forms,
+  uPrincipal in '..\Objetos\FrmPrincipal\uPrincipal.pas' {frmMonitoramento},
+  uDM in '..\Objetos\Dm\uDM.pas' {dm: TDataModule},
+  uThreadImportacao in '..\Objetos\ThreadImportacao\uThreadImportacao.pas',
+  UConexao in '..\Objetos\Conexao\UConexao.pas',
+  uConfiguracao in '..\Objetos\FrmConfiguracao\uConfiguracao.pas' {frmConfiguracao},
+  uImportacao in '..\Objetos\ClsImportacao\uImportacao.pas',
+  uImportacaoDogus in '..\Objetos\ClsImportacaoDogus\uImportacaoDogus.pas',
+  uFactoryImagem in '..\Objetos\ClsFactoryImagem\uFactoryImagem.pas';
+
+{$R *.res}
+
+begin;
+  Application.Initialize;
+  Application.MainFormOnTaskbar := True;
+  Application.Title := 'Sistema :: Importação de XML';
+  Application.CreateForm(Tdm, dm);
+  Application.CreateForm(TfrmMonitoramento, frmMonitoramento);
+  Application.Run;
+end.

@@ -1,0 +1,350 @@
+unit uFactoryImagem;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, IdHTTP, jpeg, PngImage, SqlExpr, GIFImg;
+
+type
+  TRGBArray = array[Word] of TRGBTriple;
+  pRGBArray = ^TRGBArray;
+
+type
+  TTypeImagem = (tiNone, tiJPEG, tiPNG, tiBMP, tiGIF);
+
+type
+  TFactoryImagem = class
+  private
+      FQryInsertImg: TSQLQuery;
+      FContador    : Integer;
+      FIdImobiliaria: Integer;
+      FTypeImagem  : TTypeImagem;
+      FQualidade   : Integer;
+      FMaxWidth    : Integer;
+      FMarcaAgua   : string;
+
+  public
+      procedure CombineImage(var Img: TJPEGImage ;const ATopLeftPos: TPoint;const AImgMarca: string);
+      procedure SmoothResize(Src, Dst: TBitmap);
+      procedure ResizeImage(FileNameTemp, NewNameImagem, urlFoto: string; largura, altura, idExterno: Integer; var contador: integer);
+      function StrToCoord(AStr: string): TPoint;
+      function SaveJPEGPictureFile(Bitmap: TBitmap; FilePath,FileName:string;
+      Quality: Integer): Boolean;
+      function TrataDownload(MStream: TMemoryStream; PathTempFile, PathFinalTemp: string): boolean;
+
+      property  TypeImagem: TTypeImagem read FTypeImagem write FTypeImagem;
+      property  MaxWdth: Integer read FMaxWidth write FMaxWidth;
+      property  Qualidade: Integer read FQualidade write FQualidade;
+      property  MarcaAgua: string read FMarcaAgua write FMarcaAgua;
+
+      constructor Create(var qryAux: TSQLQuery; idImobiliaria: integer);
+  end;
+
+implementation
+
+{ TFactoryImagem }
+
+procedure TFactoryImagem.CombineImage(var Img: TJPEGImage;
+  const ATopLeftPos: TPoint; const AImgMarca: string);
+var
+  vPicPai, vPicMarca: TPicture;
+  vSrcPai, vSrcMarca: TGraphic;
+  FTmpPai : TBitmap;
+begin
+
+    vPicPai := TPicture.Create;
+    vPicMarca := TPicture.Create;
+    FTmpPai := TBitmap.Create;
+    try
+        try
+            vPicPai.Assign(Img);
+            vSrcPai := vPicPai.Graphic;
+            vPicMarca.LoadFromFile(AImgMarca);
+            vSrcMarca := vPicMarca.Graphic;
+
+            FTmpPai.Width  := vSrcPai.Width;
+            FTmpPai.Height := vSrcPai.Height;
+            FTmpPai.Canvas.Draw(0, 0, vSrcPai);
+            FTmpPai.Canvas.Draw(ATopLeftPos.X, ATopLeftPos.Y, vSrcMarca);
+
+            Img.Assign(FTmpPai);
+        except
+            on E:Exception do
+            MessageDlg('Erro ao processar marca d´água : ' + E.Message, mtError, [mbOK], 0);
+        end;
+    finally
+        FreeAndNil(vPicPai);
+        FreeAndNil(vPicMarca);
+        FreeAndNil(FTmpPai);
+    end;
+end;
+
+// Procedure prepara o redimensionamento da imagem, adiciona marca d'água e grava chamando a função SaveJPEGPictureFile para gravar com baixa qualidade
+constructor TFactoryImagem.Create(var qryAux: TSQLQuery; idImobiliaria: integer);
+begin
+    Self.FQryInsertImg  := qryAux;
+    Self.FIdImobiliaria := idImobiliaria;
+end;
+
+procedure TFactoryImagem.ResizeImage(FileNameTemp, NewNameImagem, urlFoto: string;
+  largura, altura, idExterno: Integer; var contador: integer);
+var
+  OldBitmap, NewBitmap, TempBitmap: TBitmap;
+  aWidth, aHeight: Integer;
+  JPEGImage: TJPEGImage;
+
+begin
+    try
+        try
+            JPEGImage := TJPEGImage.Create;
+            JPEGImage.LoadFromFile(FileNameTemp);
+            OldBitmap := TBitmap.Create;
+
+            // Verifica se é imagem inteira e chama a função para adicionar marca d'água
+            if (largura = 0) and (altura = 0) then
+                Self.CombineImage(JPEGImage, Self.StrToCoord('5, 5'), MarcaAgua);
+
+            OldBitmap.Assign(JPEGImage);
+            begin
+                if (largura = 0) and (altura = 0) then
+                begin
+                    if (OldBitmap.Width <= Self.MaxWdth) then
+                    begin
+                        aWidth  := OldBitmap.Width;
+                        aHeight := OldBitmap.Height;
+                    end
+                    else
+                    begin
+                        aWidth  := 800;
+                        aHeight := Trunc(aWidth * OldBitmap.Height / OldBitmap.Width);
+                    end;
+                end
+                else
+                begin
+                    aWidth := largura;
+                    aHeight:= altura;
+                end;
+
+                NewBitmap := TBitmap.Create;
+                NewBitmap.Width := aWidth;
+                NewBitmap.Height := aHeight;
+                SmoothResize(OldBitmap, NewBitmap);
+
+                if SaveJPEGPictureFile(NewBitmap, ExtractFilePath(FileNameTemp), NewNameImagem, Self.Qualidade) then
+                begin
+                    Self.FQryInsertImg.Close;
+                    Self.FQryInsertImg.SQL.Clear;
+                    Self.FQryInsertImg.SQL.Add('INSERT INTO imoveis_fotos(id_imovel, destaque, foto, cod_imobiliaria, data, id_externo, url_foto) VALUES');
+                    Self.FQryInsertImg.SQL.Add('(:id_imovel, :destaque, :foto, :cod_imobiliaria, :data, :id_externo, :url_foto)');
+                    Self.FQryInsertImg.ParamByName('id_imovel').AsInteger       := 0;
+                    Self.FQryInsertImg.ParamByName('destaque').AsString         := 'NAO';
+                    Self.FQryInsertImg.ParamByName('foto').AsString             := NewNameImagem;
+                    Self.FQryInsertImg.ParamByName('cod_imobiliaria').AsInteger := Self.FIdImobiliaria;
+                    Self.FQryInsertImg.ParamByName('data').AsString             := FormatDateTime('dd/mm/yyyy', Date);
+                    Self.FQryInsertImg.ParamByName('id_externo').AsInteger      := idExterno;
+                    Self.FQryInsertImg.ParamByName('url_foto').AsString         := urlFoto;
+                    Self.FQryInsertImg.ExecSQL();
+
+                    Inc(contador);
+                end;
+            end;
+        except
+            on E:Exception do
+            MessageDlg('Erro ao redimensionar imagens: ' + E.Message + ' ' + E.ClassName, mtError, [mbOK], 0);
+        end;
+    finally
+        FreeAndNil(NewBitmap);
+        FreeAndNil(OldBitmap);
+        FreeAndNil(JPEGImage);
+    end;
+end;
+
+function TFactoryImagem.SaveJPEGPictureFile(Bitmap: TBitmap; FilePath,
+  FileName: string; Quality: Integer): Boolean;
+begin
+    Result := True;
+    try
+        if ForceDirectories(FilePath) then
+        begin
+            with TJPegImage.Create do
+            begin
+                try
+                    Assign(Bitmap);
+                    CompressionQuality := Quality;
+                    if FileName = '' then
+                      SaveToFile(FilePath)
+                    else
+                      SaveToFile(FilePath + FileName);
+                finally
+                    Free;
+                end;
+            end;
+        end;
+    except
+        on E:Exception do
+        begin
+            MessageDlg('Erro ao gravar imagens sem marca d´água: ' + E.Message, mtError, [mbOK], 0);
+            Result := False;
+        end;
+    end;
+end;
+
+procedure TFactoryImagem.SmoothResize(Src, Dst: TBitmap);
+var
+  x, y: Integer;
+  xP, yP: Integer;
+  xP2, yP2: Integer;
+  SrcLine1, SrcLine2: pRGBArray;
+  t3: Integer;
+  z, z2, iz2: Integer;
+  DstLine: pRGBArray;
+  DstGap: Integer;
+  w1, w2, w3, w4: Integer;
+begin
+    Src.PixelFormat := pf24Bit;
+    Dst.PixelFormat := pf24Bit;
+
+    try
+        if (Src.Width = Dst.Width) and (Src.Height = Dst.Height) then
+            Dst.Assign(Src)
+        else
+        begin
+            DstLine := Dst.ScanLine[0];
+            DstGap := Integer(Dst.ScanLine[1]) - Integer(DstLine);
+
+            xP2 := MulDiv(pred(Src.Width), $10000, Dst.Width);
+            yP2 := MulDiv(pred(Src.Height), $10000, Dst.Height);
+            yP := 0;
+
+            for y := 0 to pred(Dst.Height) do
+            begin
+                xP := 0;
+
+                SrcLine1 := Src.ScanLine[yP shr 16];
+
+                if (yP shr 16 = pred(Src.Height)) then
+                    SrcLine2 := Src.ScanLine[succ(yP shr 16)]
+                else
+                    SrcLine2 := Src.ScanLine[yP shr 16];
+
+                z2 := succ(yP and $FFFF);
+                iz2 := succ((not yp) and $FFFF);
+                for x := 0 to pred(Dst.Width) do
+                begin
+                    t3 := xP shr 16;
+                    z := xP and $FFFF;
+                    w2 := MulDiv(z, iz2, $10000);
+                    w1 := iz2 - w2;
+                    w4 := MulDiv(z, z2, $10000);
+                    w3 := z2 - w4;
+                    DstLine[x].rgbtRed := (SrcLine1[t3].rgbtRed * w1 +
+                      SrcLine1[t3 + 1].rgbtRed * w2 +
+                      SrcLine2[t3].rgbtRed * w3 + SrcLine2[t3+1].rgbtRed * w4) shr 16;
+                    DstLine[x].rgbtGreen :=
+                      (SrcLine1[t3].rgbtGreen * w1 + SrcLine1[t3 +1].rgbtGreen * w2 +
+
+                      SrcLine2[t3].rgbtGreen*w3+SrcLine2[t3+1].rgbtGreen * w4) shr 16;
+                    DstLine[x].rgbtBlue := (SrcLine1[t3].rgbtBlue * w1 +
+                      SrcLine1[t3 + 1].rgbtBlue * w2 +
+                      SrcLine2[t3].rgbtBlue * w3 +
+                      SrcLine2[t3 + 1].rgbtBlue * w4) shr 16;
+                    Inc(xP, xP2);
+                end;
+                Inc(yP, yP2);
+                DstLine := pRGBArray(Integer(DstLine) + DstGap);
+            end;
+        end;
+    except
+        on E:Exception do
+        MessageDlg('Erro ao processar redimensionamento: ' + E.Message, mtError, [mbOK], 0);
+    end;
+end;
+
+function TFactoryImagem.StrToCoord(AStr: string): TPoint;
+var
+  i: Integer;
+begin
+    i := System.Pos(',', AStr);
+    if i < 2 then
+      raise Exception.Create('Valor inválido para coordenada!');
+
+    Result.X := StrToInt(Trim(Copy(AStr, 1, i-1)));
+    Result.Y := StrToInt(Trim(Copy(AStr, i+1, MAXINT)));
+end;
+
+function TFactoryImagem.TrataDownload(MStream: TMemoryStream; PathTempFile, PathFinalTemp: string): boolean;
+var
+  FirstBytes: AnsiString;
+  tempJpeg, tempPng, tempBitmap, tempGif: TGraphic;
+begin
+    try
+        SetLength(FirstBytes, 8);
+        MStream.Read(FirstBytes[1], 8);
+
+        if Copy(FirstBytes, 1, 2) = 'BM' then
+        begin
+            Self.TypeImagem := tiBMP;
+        end
+        else
+            if FirstBytes = #137'PNG'#13#10#26#10 then
+            begin
+                Self.TypeImagem := tiPNG;
+            end
+            else
+               if Copy(FirstBytes, 1, 2) = #$FF#$D8 then
+               begin
+                   Self.TypeImagem := tiJPEG;
+               end
+               else
+                  if Copy(FirstBytes, 1, 3) =  'GIF' then
+                  begin
+                      Self.TypeImagem := tiGIF;
+                  end;
+
+
+        case Self.TypeImagem of
+            tiJPEG : begin
+                        MStream.SaveToFile(PathFinalTemp);
+                     end;
+
+            tiBMP : begin
+                        MStream.SaveToFile(PathTempFile + '.bmp');
+                        tempBitmap := TBitmap.Create;
+                        tempBitmap.LoadFromFile(PathTempFile + '.bmp');
+                        tempJpeg := TJPEGImage.Create;
+                        tempJpeg.Assign(tempBitmap);
+                        tempJpeg.SaveToFile(PathFinalTemp);
+                        DeleteFile(PathTempFile + '.bmp');
+                    end;
+
+            tiPNG : begin
+                        MStream.SaveToFile(PathTempFile + '.png');
+                        tempBitmap := TBitmap.Create;
+                        tempPng := TPngImage.Create;
+                        tempPng.LoadFromFile(PathTempFile + '.png');
+                        tempBitmap.Assign(tempPng);
+                        tempJpeg := TJPEGImage.Create;
+                        tempJpeg.Assign(tempBitmap);
+                        tempJpeg.SaveToFile(PathFinalTemp);
+                        DeleteFile(PathTempFile + '.png');
+                    end;
+
+            tiGIF : begin
+                        MStream.SaveToFile(PathTempFile + '.gif');
+                        tempGif := TGifImage.Create;
+                        tempGif.LoadFromFile(PathTempFile + '.gif');
+                        tempJpeg := TJPEGImage.Create;
+                        tempJpeg.Assign(tempGif);
+                        tempJpeg.SaveToFile(PathFinalTemp);
+                        DeleteFile(PathTempFile + '.gif');
+                    end;
+        end;
+
+        Result := True;
+    except
+        Result := False;
+    end;
+end;
+
+end.

@@ -1,0 +1,403 @@
+unit uPrincipal;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, Buttons, JvExStdCtrls, JvGroupBox, ExtCtrls, IOUtils,
+  FMTBcd, DB, SqlExpr, DateUtils, xmldom, XMLIntf, msxmldom, XMLDoc,
+  IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdHTTP, jpeg, StrUtils,
+  PngImage, uThreadImportacao, IdAntiFreezeBase, IdAntiFreeze;
+
+type
+   TStatus = (stLigado, stDesligado);
+
+type
+  TfrmMonitoramento = class(TForm)
+    JvGroupBox1: TJvGroupBox;
+    lblStatus: TLabel;
+    btnIniciar: TBitBtn;
+    btnParar: TBitBtn;
+    Timer: TTimer;
+    TrayIcon: TTrayIcon;
+    IdAntiFreeze1: TIdAntiFreeze;
+    btnConfiguracoes: TBitBtn;
+    procedure FormCreate(Sender: TObject);
+    procedure TimerTimer(Sender: TObject);
+    procedure btnPararClick(Sender: TObject);
+    procedure btnIniciarClick(Sender: TObject);
+    procedure btnConfiguracoesClick(Sender: TObject);
+    procedure FormClose(Sender: TObject; var Action: TCloseAction);
+  private
+    procedure setStatus(const Value: TStatus);
+    { Private declarations }
+  public
+    FStatus: TStatus;
+    FLAG_QUALITY_SM: Integer;
+    FLAG_MAX_WIDTH: Integer;
+
+    function GetBuildInfo:string;
+    function FormataCaptionMenu: string;
+    function VerificaDuplicacaoTarefa(idAgendamento: integer; data: TDateTime): Boolean;
+    function VerificaControle():Boolean;
+    procedure AtualizaControle(Acao: string);
+    procedure InseriTarefa(idAgendamento: Integer);
+    property Status: TStatus read FStatus write setStatus;
+
+  end;
+
+var
+  frmMonitoramento: TfrmMonitoramento;
+  Arq: TFile;
+  ThreadImp: ThreadImportacao;
+
+implementation
+
+uses uDM, uConfiguracao;
+
+{$R *.dfm}
+// Função para retornar o dia semana por extenso
+function DiaSemana(Data:TDateTime): String;
+var
+  NoDia : Integer;
+  DiaDaSemana : array [1..7] of String[13];
+begin
+    DiaDasemana [1]:= 'DOMINGO';
+    DiaDasemana [2]:= 'SEGUNDA';
+    DiaDasemana [3]:= 'TERÇA';
+    DiaDasemana [4]:= 'QUARTA';
+    DiaDasemana [5]:= 'QUINTA';
+    DiaDasemana [6]:= 'SEXTA';
+    DiaDasemana [7]:= 'SÁBADO';
+    NoDia:=DayOfWeek(Data);
+    DiaSemana:=DiaDasemana[NoDia];
+end;
+
+procedure TfrmMonitoramento.AtualizaControle(Acao: string);
+var
+  oQry: TSQLQuery;
+begin
+     try
+         try
+
+             if not dm.conexaoMonitoramento.Connected then
+                dm.conexao.Open;
+
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := dm.conexaoMonitoramento;
+             oQry.Close;
+             oQry.SQL.Clear;
+             oQry.SQL.Add('UPDATE TAB_CONTROLE SET acao = :acao');
+             oQry.ParamByName('acao').AsString := Acao;
+             oQry.ExecSQL();
+
+         except
+             on E:Exception do
+             begin
+                MessageDlg('Erro ao atualizar controle: ' + E.Message, mtError, [mbOK], 0);
+             end;
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+procedure TfrmMonitoramento.btnConfiguracoesClick(Sender: TObject);
+begin
+    try
+       frmConfiguracao := TfrmConfiguracao.Create(nil);
+       frmConfiguracao.ShowModal;
+    finally
+       FreeAndNil(frmConfiguracao);
+    end;
+end;
+
+procedure TfrmMonitoramento.btnIniciarClick(Sender: TObject);
+begin
+  self.setStatus(stLigado);
+end;
+
+procedure TfrmMonitoramento.btnPararClick(Sender: TObject);
+begin
+    if MessageDlg('Tem certeza que deseja parar a importação?'#13'- As informações no banco de dados podem ser inconsistentes.'#13'- O processamento das imagens será comprometido.', mtWarning, mbYesNo, 0) = mrYes then
+    begin
+       if Assigned(ThreadImp) then
+          ThreadImp.Finalizar;
+
+       self.setStatus(stDesligado);
+    end;
+end;
+
+// Função monta a string do caption do formulário
+function TfrmMonitoramento.FormataCaptionMenu: string;
+var
+   Str: TStringBuilder;
+begin
+     try
+         Str := TStringBuilder.Create;
+         Str.Append(Application.Title);
+         Str.Append(' - Versão: [' + GetBuildInfo + ']');
+         Str.Append(' - Última atualização: [' + DateToStr(Arq.GetLastWriteTime(Application.ExeName)) + ']');
+
+         Result := Str.ToString;
+     finally
+          FreeAndNil(Str);
+     end;
+end;
+
+procedure TfrmMonitoramento.FormClose(Sender: TObject;
+  var Action: TCloseAction);
+begin
+    if Self.Status = stLigado then
+    begin
+        btnParar.Click;
+    end;
+end;
+
+procedure TfrmMonitoramento.FormCreate(Sender: TObject);
+begin
+    self.Caption         := FormataCaptionMenu;
+    Self.FLAG_QUALITY_SM := dm.conn.Quality1;
+    Self.FLAG_MAX_WIDTH  := dm.conn.MaxWidth;
+    Self.setStatus(stLigado);
+end;
+
+// Função que captura retorna uma string com a versão do sistema
+function TfrmMonitoramento.GetBuildInfo:string;
+var
+    VerInfoSize: DWORD;
+    VerInfo: Pointer;
+    VerValueSize: DWORD;
+    VerValue: PVSFixedFileInfo;
+    Dummy: DWORD;
+    V1, V2, V3, V4: Word;
+    Prog,ultimo : string;
+begin
+    Prog := Application.Exename;
+    VerInfoSize := GetFileVersionInfoSize(PChar(prog), Dummy);
+    GetMem(VerInfo, VerInfoSize);
+    GetFileVersionInfo(PChar(prog), 0, VerInfoSize, VerInfo);
+    VerQueryValue(VerInfo, '', Pointer(VerValue), VerValueSize);
+    with VerValue^ do
+    begin
+          V1 := dwFileVersionMS shr 16;
+          V2 := dwFileVersionMS and $FFFF;
+          V3 := dwFileVersionLS shr 16;
+          V4 := dwFileVersionLS and $FFFF;
+    end;
+    FreeMem(VerInfo, VerInfoSize);
+    ultimo := Copy ('100' + IntToStr(v4), 4, 2);
+
+    result := Copy ('100'+IntToStr (v1), 4, 2) + '.' +
+              Copy ('100'+IntToStr (v2), 4, 2) + '.' +
+              Copy ('100'+IntToStr (v3), 4, 2) + '.' +
+              Copy ('100'+IntToStr (v4), 4, 2);
+end;
+
+procedure TfrmMonitoramento.InseriTarefa(idAgendamento: Integer);
+var
+  oQry: TSQLQuery;
+begin
+     try
+         try
+             if not dm.conexaoMonitoramento.Connected then
+                dm.conexao.Open;
+
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := dm.conexaoMonitoramento;
+             oQry.Close;
+             oQry.SQL.Clear;
+             oQry.SQL.Add('INSERT INTO TAB_TAREFA (idAgendamento, statusAtual, registro, msg)VALUES(:id, :status, :registro, :msg)');
+             oQry.ParamByName('id').AsInteger      := idAgendamento;
+             oQry.ParamByName('status').AsString   := 'E';
+             oQry.ParamByName('registro').AsString := 'A';
+             oQry.ParamByName('msg').AsString := 'Aguardando início';
+             oQry.ExecSQL();
+         except
+             on E:Exception do
+             MessageDlg('Erro ao inserir início de tarefa: ' + E.Message, mtError, [mbOK], 0);
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+// Procedure grava o status do monitoramento
+procedure TfrmMonitoramento.setStatus(const Value: TStatus);
+begin
+   FStatus := Value;
+
+   if FStatus = stLigado then
+   begin
+       Self.AtualizaControle('L');
+       btnIniciar.Enabled       := false;
+       btnConfiguracoes.Enabled := False;
+       btnParar.Enabled         := true;
+       lblStatus.Font.Color     := clGreen;
+       lblStatus.Caption        := 'Ligado';
+   end
+   else
+   begin
+       Self.AtualizaControle('D');
+       btnIniciar.Enabled       := true;
+       btnConfiguracoes.Enabled := True;
+       btnParar.Enabled         := false;
+       lblStatus.Font.Color     := clRed;
+       lblStatus.Caption        := 'Desligado';
+   end;
+end;
+
+// Procedure que monitora os agendamentos gravados no banco de dados a cada 10 segundos
+procedure TfrmMonitoramento.TimerTimer(Sender: TObject);
+var
+  sSemana: string;
+  wDia, wMes, wAno : Word;
+  iIdObjeto: Integer;
+begin
+     Self.VerificaControle;
+     if (self.Status = stLigado) then
+     begin
+         try
+             try
+                 sSemana := DiaSemana(Now);
+                 DecodeDate(Now, wAno, wMes, wDia);
+
+                 // Abre a conexão com o banco de dados
+                 dm.conexaoMonitoramento.Open;
+                 if not dm.conexaoMonitoramento.Connected then
+                    raise Exception.Create('Não foi possível conectar com o banco de dados!');
+
+                 // Filtra todos os agendamentos que estão com status Ativo
+                 dm.cdsAgendamento.Close;
+                 dm.qryAgendamento.Close;
+                 dm.qryAgendamento.SQL.Clear;
+                 dm.qryAgendamento.SQL.Add('SELECT A.*, I.idBancoDados, I.idImobiliaria as idCliente, I.descricaoImobiliaria ');
+                 dm.qryAgendamento.SQL.Add('FROM TAB_AGENDAMENTO A INNER JOIN TAB_IMOBILIARIA I ON A.idImobiliaria = I.id ');
+                 dm.qryAgendamento.SQL.Add('WHERE A.statusAgendamento = :statusA AND A.registro = :registro ORDER BY id');
+                 dm.qryAgendamento.ParamByName('statusA').AsString  := 'A';
+                 dm.qryAgendamento.ParamByName('registro').AsString := 'A';
+                 dm.qryAgendamento.Open;
+                 dm.cdsAgendamento.Open;
+
+                 // Verifica se a foram retornados registros
+                 if not dm.cdsAgendamento.IsEmpty then
+                 begin
+
+                     // Posiciona o cursor no primeiro registro e inicia o Loop
+                     dm.cdsAgendamento.First;
+                     while not dm.cdsAgendamento.Eof do
+                     begin
+
+                         // Verifica se o agendamento ainda não foi cadastrado na tabela de tarefas, se o registro está agendado para hora atual do sistema
+                         if  (not Self.VerificaDuplicacaoTarefa(dm.cdsAgendamento.FieldByName('id').AsInteger, Date)) and (dm.cdsAgendamento.FieldByName('horaAgendamento').AsString = FormatDateTime('HH:MM', Time)) then
+                         begin
+
+                             // Verifica se o agendamento é para data, dia da semana por extenso ou dia atual
+                             if ((dm.cdsAgendamento.FieldByName('dataAgendamento').AsDateTime = Date) and (dm.cdsAgendamento.FieldByName('repeticao').AsString = 'U')) or
+                                (dm.cdsAgendamento.FieldByName('diaSemana').AsString = sSemana) or (dm.cdsAgendamento.FieldByName('dia').AsString = IntToStr(wDia)) or
+                                (dm.cdsAgendamento.FieldByName('repeticao').AsString = 'D')then
+                             begin
+                                 Self.InseriTarefa(dm.cdsAgendamento.FieldByName('id').AsInteger);
+                                 ThreadImp := ThreadImportacao.Create(false, dm.cdsAgendamento.FieldByName('id').AsInteger, dm.cdsAgendamento.FieldByName('idCliente').AsInteger,
+                                                    dm.cdsAgendamento.FieldByName('idBancoDados').AsInteger, dm.cdsAgendamento.FieldByName('tipoXml').AsString, dm.conexao);
+                             end;
+                         end;
+                         dm.cdsAgendamento.Next;
+                     end;
+                 end;
+
+             except
+                 on E:Exception do
+                 MessageDlg('Erro ao monitorar agendamentos: ' + E.Message, mtError, [mbOK], 0);
+
+             end;
+         finally
+            dm.conexaoMonitoramento.Close;
+         end;
+     end;
+end;
+
+// Função que verifica se o monitoramento está Ligado (L) ou Desligado (D)
+function TfrmMonitoramento.VerificaControle: Boolean;
+var
+  oQry: TSQLQuery;
+begin
+     try
+         try
+             Result := False;
+
+             if not dm.conexaoMonitoramento.Connected then
+                dm.conexao.Open;
+
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := dm.conexaoMonitoramento;
+             oQry.Close;
+             oQry.SQL.Clear;
+             oQry.SQL.Add('SELECT acao FROM TAB_CONTROLE');
+             oQry.Open;
+
+             if not oQry.IsEmpty then
+             begin
+                 if oQry.FieldByName('acao').AsString = 'L' then
+                 begin
+                    Self.setStatus(stLigado);
+                    Result := True;
+                 end
+                 else
+                 begin
+                    Self.setStatus(stDesligado);
+                    Result := False;
+                    if Assigned(ThreadImp) then
+                       ThreadImp.Finalizar;
+                 end;
+             end;
+         except
+             on E:Exception do
+             begin
+                MessageDlg('Erro ao verificar estado do monitoramento: ' + E.Message, mtError, [mbOK], 0);
+                Self.setStatus(stDesligado);
+             end;
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+
+function TfrmMonitoramento.VerificaDuplicacaoTarefa(idAgendamento: integer;
+  data: TDateTime): Boolean;
+var
+  oQry: TSQLQuery;
+begin
+     try
+         try
+             if not dm.conexaoMonitoramento.Connected then
+                dm.conexao.Open;
+
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := dm.conexaoMonitoramento;
+             oQry.Close;
+             oQry.SQL.Clear;
+             oQry.SQL.Add('SELECT id FROM TAB_TAREFA WHERE idAgendamento = :id AND dataCadastro = :data AND registro = :registro');
+             oQry.ParamByName('id').AsInteger       := idAgendamento;
+             oQry.ParamByName('data').AsDateTime    := data;
+             oQry.ParamByName('registro').AsString := 'A';
+             oQry.Open;
+
+             if oQry.IsEmpty then
+                Result := False
+             else
+                Result := True;
+         except
+             on E:Exception do
+             begin
+                MessageDlg('Erro ao verificar duplicidade nas tarefas: ' + E.Message, mtError, [mbOK], 0);
+                Result := True;
+             end;
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+end.

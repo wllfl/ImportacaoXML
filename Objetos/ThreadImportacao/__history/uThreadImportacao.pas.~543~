@@ -1,0 +1,183 @@
+
+unit uThreadImportacao;
+
+interface
+
+uses
+   Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, Buttons, JvExStdCtrls, JvGroupBox, ExtCtrls, IOUtils,
+  FMTBcd, DB, SqlExpr, DateUtils, xmldom, XMLIntf, msxmldom, XMLDoc,
+  IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdHTTP, jpeg, StrUtils,
+  PngImage, ActiveX, DBXCommon, SyncObjs, DBClient, Provider;
+
+type
+  TRGBArray = array[Word] of TRGBTriple;
+  pRGBArray = ^TRGBArray;
+
+type
+   TDefaultXML = (dxNone, dxDogus);
+
+type
+  ThreadImportacao = class(TThread)
+  private
+    FDefaultXML: TDefaultXML;
+    FIdAgendameto: integer;
+    FIdImobiliaria: Integer;
+    FIdBancoDados: Integer;
+    FPortal: string;
+    FUrlXml: string;
+    FPathXml: string;
+    FPathMarcaAgua: string;
+    FPathImagem: string;
+    FNomeMarcaAgua: string;
+    FTipoXml: string;
+    FConexaoPortal: TSQLConnection;
+    FConexaoAux: TSQLConnection;
+    procedure setConexaoAux(const Value: TSQLConnection);
+    function getConexaoAux: TSQLConnection;
+
+  protected
+    procedure AtualizaInfoTarefa(idAgendamento: integer; duracao, status, msg, nameXml: string);
+    procedure Execute; override;
+
+  public
+    property ConexaoAux: TSQLConnection read getConexaoAux write setConexaoAux;
+    procedure Finalizar();
+
+    constructor Create(CreateSuspended: Boolean; idAgendamento, idImobiliaria, idBancoDados: integer; tipoXML: string; var ConexaoAux: TSQLConnection);
+  end;
+
+var
+  iContFoto, iContErroFoto, iContTotalItem, iContTotalFoto, iContInserido, iContAtualizado, iContExcluido: Integer;
+  FCritical : TCriticalSection;
+
+implementation
+
+uses uPrincipal, uDM, uImportacao, uImportacaoDogus;
+
+{ ThreadImportacao }
+
+// Método que dispara a Thread
+procedure ThreadImportacao.Execute;
+begin
+    if not Terminated  then
+    begin
+        try
+            // Inicializa a Seção critica
+            FCritical.Enter;
+
+            CoInitialize(nil);
+            case FDefaultXML of
+               dxDogus : TImportacaoDogus.Create(FIdAgendameto, FIdImobiliaria, FIdBancoDados, FConexaoAux);
+            else
+               Abort;
+            end;
+        finally
+            // Inicializa a Seção critica
+            FCritical.Leave;
+        end;
+    end;
+end;
+
+procedure ThreadImportacao.Finalizar;
+begin
+    Self.Terminate;
+    Self.AtualizaInfoTarefa(FIdAgendameto, '', 'C', 'Cancelado pelo usuário', '');
+end;
+
+// Método constutor da Classe
+constructor ThreadImportacao.Create(CreateSuspended: Boolean; idAgendamento,
+  idImobiliaria, idBancoDados: integer; tipoXML: string; var ConexaoAux: TSQLConnection);
+begin
+    inherited Create(CreateSuspended);
+    Self.FDefaultXML := dxNone;
+    Self.FIdAgendameto  := idAgendamento;
+    Self.FIdImobiliaria := idImobiliaria;
+    Self.FIdBancoDados  := idBancoDados;
+    Self.setConexaoAux(ConexaoAux);
+
+    if tipoXML = 'dogus' then
+       Self.FDefaultXML := dxDogus
+end;
+
+// Procedure para finalizar a tarefa inserindo os dados necessários na TAB_TAREFA
+procedure ThreadImportacao.AtualizaInfoTarefa(idAgendamento: integer; duracao, status, msg, nameXml: string);
+var
+  oQry: TSQLQuery;
+  sSqlFull, sSqlMin : string;
+begin
+     try
+         sSqlFull := 'UPDATE TAB_TAREFA SET statusAtual = :status, qtdeRegistroI = :qRegistroI, qtdeImagem = :qImagem, qtdeErroImagem = :qErroImagem, duracao = :duracao, msg = :msg, xmlTotalImovel = :qTotalImovel, ';
+         sSqlFull := sSqlFull + 'xmlTotalFoto = :qTotalFoto, qtdeRegistroA = :qRegistroA, qtdeRegistroE = :qRegistroE ';
+         sSqlMin  := 'UPDATE TAB_TAREFA SET xmlTotalImovel = :qTotalImovel,  xmlTotalFoto = :qTotalFoto ';
+
+         try
+             oQry := TSQLQuery.Create(nil);
+             oQry.SQLConnection := Self.getConexaoAux();
+             oQry.Close;
+             oQry.SQL.Clear;
+
+             if status = EmptyStr then
+                oQry.SQL.Add(sSqlMin)
+             else
+                oQry.SQL.Add(sSqlFull);
+
+             oQry.SQL.Add('WHERE idAgendamento = :id AND statusAtual = :statusAtual AND dataCadastro = :data');
+
+             if status = EmptyStr then
+             begin
+                 oQry.ParamByName('qTotalImovel').AsInteger := iContTotalItem;
+                 oQry.ParamByName('qTotalFoto').AsInteger   := iContTotalFoto;
+             end
+             else
+             begin
+                 oQry.ParamByName('status').AsString        := status;
+                 oQry.ParamByName('qRegistroI').AsInteger   := iContInserido;
+                 oQry.ParamByName('qRegistroA').AsInteger   := iContAtualizado;
+                 oQry.ParamByName('qRegistroE').AsInteger   := iContExcluido;
+                 oQry.ParamByName('qImagem').AsInteger      := iContFoto;
+                 oQry.ParamByName('qErroImagem').AsInteger  := iContErroFoto;
+                 oQry.ParamByName('duracao').AsString       := duracao;
+                 oQry.ParamByName('msg').AsString           := msg;
+                 oQry.ParamByName('qTotalImovel').AsInteger := iContTotalItem;
+                 oQry.ParamByName('qTotalFoto').AsInteger   := iContTotalFoto;
+             end;
+
+             oQry.ParamByName('id').AsInteger           := idAgendamento;
+             oQry.ParamByName('statusAtual').AsString   := 'E';
+             oQry.ParamByName('data').AsDateTime        := Date;
+             oQry.ExecSQL();
+
+             DeleteFile(FPathXml + nameXml);
+         except
+             on E:Exception do
+             MessageDlg('Erro ao atualizar status da tarefa: ' + E.Message, mtError, [mbOK], 0);
+         end;
+     finally
+         FreeAndNil(oQry);
+     end;
+end;
+
+function ThreadImportacao.getConexaoAux: TSQLConnection;
+begin
+    FConexaoAux.Open;
+    Sleep(2000);
+    Result := FConexaoAux;
+end;
+
+procedure ThreadImportacao.setConexaoAux(const Value: TSQLConnection);
+begin
+    if Assigned(Value) then
+    begin
+        Value.Connected := False;
+        FConexaoAux := Value;
+    end;
+end;
+
+initialization
+  FCritical := TCriticalSection.Create;
+
+finalization
+  FreeAndNil(FCritical);
+
+end.

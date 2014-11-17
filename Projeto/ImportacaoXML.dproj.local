@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>2014/05/06 17:41:49.000.576,=C:\Users\Guia São Roque\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2014/05/26 11:56:12.000.152,=C:\Users\Guia São Roque\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2014/05/26 11:56:53.000.682,C:\Users\Guia São Roque\Documents\RAD Studio\Projects\Unit1.pas=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\FrmPrincipal\uPrincipal.pas</Transaction>
+    <Transaction>2014/05/26 11:56:53.000.682,C:\Users\Guia São Roque\Documents\RAD Studio\Projects\Unit1.dfm=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\FrmPrincipal\uPrincipal.dfm</Transaction>
+    <Transaction>2014/05/26 11:57:04.000.346,C:\Users\Guia São Roque\Documents\RAD Studio\Projects\Project1.dproj=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\ImportacaoXML.dproj</Transaction>
+    <Transaction>2014/05/26 12:03:24.000.029,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas</Transaction>
+    <Transaction>2014/05/26 12:07:24.000.316,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\Dm\uDM.pas</Transaction>
+    <Transaction>2014/05/26 12:07:24.000.316,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.dfm=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\Dm\uDM.dfm</Transaction>
+    <Transaction>2014/05/26 12:22:08.000.147,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas</Transaction>
+    <Transaction>2014/05/26 12:22:37.000.815,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\ThreadImportacao\uThreadImportacao.pas</Transaction>
+    <Transaction>2014/05/29 12:52:22.000.992,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\Conexao\UConexao.pas</Transaction>
+    <Transaction>2014/05/29 14:52:22.000.771,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas</Transaction>
+    <Transaction>2014/05/29 14:53:20.000.560,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.dfm=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\FrmConfiguracao\uConfiguracao.dfm</Transaction>
+    <Transaction>2014/05/29 14:53:20.000.560,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\FrmConfiguracao\uConfiguracao.pas</Transaction>
+    <Transaction>2014/06/11 11:08:17.000.063,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas</Transaction>
+    <Transaction>2014/06/11 11:10:50.000.222,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\ClsImportacao\uImportacao.pas</Transaction>
+    <Transaction>2014/06/11 11:46:45.000.610,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas</Transaction>
+    <Transaction>2014/06/11 11:47:24.000.671,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Unit1.pas=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\ClsImportacaoDogus\uImportacaoDogus.pas</Transaction>
+    <Transaction>2014/07/24 14:02:47.000.812,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\ClsFactoryImagem\uFactoryImagem.pas</Transaction>
+    <Transaction>2014/07/24 14:05:50.000.936,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\ClsFactoryImagem\uFactoryImagem.pas=</Transaction>
+    <Transaction>2014/07/24 14:06:27.000.092,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Objetos\ClsFactoryImagem\uFactoryImagem.pas</Transaction>
+    <Transaction>2014/08/01 15:50:24.000.061,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Debug\Win32\FastMM4Messages.pas</Transaction>
+    <Transaction>2014/08/01 15:50:24.000.023,=C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Debug\Win32\FastMM4.pas</Transaction>
+    <Transaction>2014/08/01 15:56:13.000.208,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Debug\Win32\FastMM4.pas=</Transaction>
+    <Transaction>2014/08/01 15:56:16.000.590,C:\Users\Guia São Roque\Documents\Projetos\ImportacaoXML\Projeto\Debug\Win32\FastMM4Messages.pas=</Transaction>
+  </Transactions>
+</BorlandProject>
